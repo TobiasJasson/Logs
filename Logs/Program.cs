@@ -1,3 +1,7 @@
+using Aplication.Abstractions;
+using Aplication.Config;
+using Aplication.DTOs;
+using Aplication.UseCases;
 using Infrastructure.Messaging;
 using Infrastructure.Notifications;
 using Infrastructure.Repositories;

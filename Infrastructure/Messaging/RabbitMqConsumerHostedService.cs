@@ -1,17 +1,13 @@
-﻿using Application.DTOs;
-using Application.UseCases;
+﻿using Aplication.DTOs;
+using Aplication.UseCases;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using System;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using static MongoDB.Driver.WriteConcern;
 
 namespace Infrastructure.Messaging
 {
