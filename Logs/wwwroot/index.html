@@ -2,195 +2,24 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aeropuerto UAI - Pantallas Públicas y Monitor de Alertas (Grupo 8)</title>
-    <style>
-        :root {
-            --bg-dark: #0f172a;
-            --card-bg: #1e293b;
-            --text-main: #f8fafc;
-            --info: #3b82f6;
-            --aprobado: #10b981;
-            --alerta: #f59e0b;
-            --error: #ef4444;
-        }
-
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--bg-dark);
-            color: var(--text-main);
-            margin: 0;
-            padding: 20px;
-        }
-
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 2px solid #334155;
-            padding-bottom: 15px;
-            margin-bottom: 20px;
-        }
-
-        .status-badge {
-            background: var(--aprobado);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-weight: bold;
-            font-size: 0.9rem;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-        }
-
-        .panel {
-            background: var(--card-bg);
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-        }
-
-        th, td {
-            text-align: left;
-            padding: 12px;
-            border-bottom: 1px solid #334155;
-        }
-
-        th {
-            color: #94a3b8;
-            text-transform: uppercase;
-            font-size: 0.85rem;
-        }
-
-        .badge {
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-weight: bold;
-            font-size: 0.8rem;
-            display: inline-block;
-        }
-
-        .sev-Informacion {
-            background: rgba(59, 130, 246, 0.2);
-            color: #60a5fa;
-            border: 1px solid var(--info);
-        }
-
-        .sev-Aprobado {
-            background: rgba(16, 185, 129, 0.2);
-            color: #34d399;
-            border: 1px solid var(--aprobado);
-        }
-
-        .sev-Alerta {
-            background: rgba(245, 158, 11, 0.2);
-            color: #fbbf24;
-            border: 1px solid var(--alerta);
-        }
-
-        .sev-Error {
-            background: rgba(239, 68, 68, 0.2);
-            color: #f87171;
-            border: 1px solid var(--error);
-        }
-
-        /* Contenedor de PopUps Flotantes */
-        #popup-container {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            width: 380px;
-            z-index: 9999;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-
-        .popup-card {
-            background: #1e293b;
-            border-left: 6px solid var(--info);
-            border-radius: 8px;
-            padding: 16px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.6);
-            animation: slideIn 0.3s ease-out;
-            position: relative;
-        }
-
-            .popup-card.Informacion {
-                border-left-color: var(--info);
-            }
-
-            .popup-card.Aprobado {
-                border-left-color: var(--aprobado);
-            }
-
-            .popup-card.Alerta {
-                border-left-color: var(--alerta);
-            }
-
-            .popup-card.Error {
-                border-left-color: var(--error);
-            }
-
-        .popup-header {
-            display: flex;
-            justify-content: space-between;
-            font-weight: bold;
-            margin-bottom: 6px;
-        }
-
-        .popup-meta {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            margin-top: 8px;
-        }
-
-        @keyframes slideIn {
-            from {
-                transform: translateX(100%);
-                opacity: 0;
-            }
-
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
-        }
-
-        .btn-group button {
-            padding: 8px 12px;
-            margin-right: 6px;
-            border: none;
-            border-radius: 6px;
-            color: white;
-            cursor: pointer;
-            font-weight: bold;
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
-    <header>
+    <header class="main-header">
         <div>
-            <h1 style="margin:0;">✈️ Aeropuerto Internacional UAI — Pantallas Públicas</h1>
-            <small style="color:#94a3b8;">Grupo 8: Logs Centralizados, Notificaciones y Pantallas en Tiempo Real</small>
+            <h1>Aeropuerto Internacional UAI — Pantallas Públicas</h1>
+            <small>Grupo 8: Logs Centralizados, Notificaciones y Pantallas en Tiempo Real</small>
         </div>
         <div id="conn-status" class="status-badge">Conectado en Tiempo Real (SSE)</div>
     </header>
 
-    <!-- Contenedor donde aparecen los PopUps de Alerta, Error, Información y Aprobado -->
+    <!-- Contenedor flotante donde se disparan los PopUps (Información, Aprobado, Alerta, Error) -->
     <div id="popup-container"></div>
 
-    <div class="grid">
-        <div class="panel">
+    <main class="grid">
+        <section class="panel">
             <h2>Tablero Público de Operaciones y Vuelos (Salidas / Llegadas)</h2>
             <table>
                 <thead>
@@ -204,103 +33,23 @@
                 </thead>
                 <tbody id="tabla-publica"></tbody>
             </table>
-        </div>
+        </section>
 
-        <div class="panel">
-            <h2>Simulador de Pruebas (PopUps)</h2>
-            <p style="font-size:0.9rem; color:#94a3b8;">Dispara eventos de prueba para verificar los 4 tipos de PopUps y su guardado en MongoDB:</p>
+        <section class="panel">
+            <h2>Simulador de Pruebas (PopUps y API)</h2>
+            <p class="subtitle">Dispara eventos de prueba hacia la API para verificar los 4 PopUps y su persistencia:</p>
             <div class="btn-group">
-                <button style="background:var(--info)" onclick="simular('Informacion', 'Meteorologia', 'Pista 09L', 'Viento 12 km/h, visibilidad óptima')">Info</button>
-                <button style="background:var(--aprobado)" onclick="simular('Aprobado', 'TorreControl', 'AR1234', 'Autorización de despegue otorgada')">Aprobado</button>
-                <button style="background:var(--alerta)" onclick="simular('Alerta', 'GestionVuelos', 'AR5500', 'Demora de 20 min por carga de equipaje')">Alerta</button>
-                <button style="background:var(--error)" onclick="simular('Error', 'TorreControl', 'Pista 09L', 'Pista bloqueada por ráfagas de viento cruzado')">Error</button>
+                <button class="btn-info" onclick="simular('Informacion', 'Meteorologia', 'Pista 09L', 'Viento 12 km/h, visibilidad óptima')">Info</button>
+                <button class="btn-aprobado" onclick="simular('Aprobado', 'TorreControl', 'AR1234', 'Autorización de despegue otorgada')">Aprobado</button>
+                <button class="btn-alerta" onclick="simular('Alerta', 'GestionVuelos', 'AR5500', 'Demora de 20 min por carga de equipaje')">Alerta</button>
+                <button class="btn-error" onclick="simular('Error', 'TorreControl', 'Pista 09L', 'Pista bloqueada por ráfagas de viento cruzado')">Error</button>
             </div>
-            <hr style="border-color:#334155; margin:20px 0;">
+            <hr class="divider">
             <h3>Bitácora Interna en Vivo</h3>
-            <div id="bitacora-interna" style="max-height: 350px; overflow-y: auto; font-size: 0.85rem;"></div>
-        </div>
-    </div>
+            <div id="bitacora-interna" class="log-box"></div>
+        </section>
+    </main>
 
-    <script>
-        const tablaPublica = document.getElementById('tabla-publica');
-        const bitacoraInterna = document.getElementById('bitacora-interna');
-        const popupContainer = document.getElementById('popup-container');
-
-        const iconos = {
-            'Informacion': 'ℹ️ INFORMACIÓN',
-            'Aprobado': '✅ APROBADO',
-            'Alerta': '⚠️ ALERTA',
-            'Error': '🚨 ERROR CRÍTICO'
-        };
-
-        function mostrarPopUp(log) {
-            const card = document.createElement('div');
-            card.className = `popup-card ${log.severidad}`;
-            const hora = new Date(log.timestampEmision).toLocaleTimeString();
-
-            card.innerHTML = `
-                <div class="popup-header">
-                    <span>${iconos[log.severidad] || 'NOTIFICACIÓN'}</span>
-                    <span style="cursor:pointer" onclick="this.parentElement.parentElement.remove()">✖</span>
-                </div>
-                <div>${log.mensaje}</div>
-                <div class="popup-meta">Origen: <b>${log.origen}</b> | ID: <b>${log.ubicacionId}</b> | ${hora}</div>
-            `;
-            popupContainer.prepend(card);
-            setTimeout(() => { if (card.parentElement) card.remove(); }, 7000);
-        }
-
-        function agregarFilaPublica(log) {
-            if (!log.esPublico) return;
-            const tr = document.createElement('tr');
-            const hora = new Date(log.timestampEmision).toLocaleTimeString();
-            tr.innerHTML = `
-                <td>${hora}</td>
-                <td>${log.origen}</td>
-                <td><b>${log.ubicacionId}</b></td>
-                <td>${log.tipoEvento}</td>
-                <td><span class="badge sev-${log.severidad}">${log.severidad.toUpperCase()}</span> ${log.mensaje}</td>
-            `;
-            tablaPublica.prepend(tr);
-        }
-
-        function agregarBitacora(log) {
-            const div = document.createElement('div');
-            div.style.padding = "8px 0";
-            div.style.borderBottom = "1px solid #334155";
-            const hora = new Date(log.timestampEmision).toLocaleTimeString();
-            div.innerHTML = `<span class="badge sev-${log.severidad}">${log.severidad}</span> <b>[${hora}] ${log.origen} (${log.ubicacionId}):</b> ${log.mensaje}`;
-            bitacoraInterna.prepend(div);
-        }
-
-        // Cargar últimos eventos al abrir la pantalla
-        fetch('/api/pantallas/eventos')
-            .then(r => r.json())
-            .then(logs => logs.reverse().forEach(l => { agregarFilaPublica(l); agregarBitacora(l); }));
-
-        // Suscripción en Tiempo Real (SSE)
-        const evtSource = new EventSource('/api/pantallas/stream');
-        evtSource.onmessage = (event) => {
-            const log = JSON.parse(event.data);
-            mostrarPopUp(log);
-            agregarFilaPublica(log);
-            agregarBitacora(log);
-        };
-
-        async function simular(severidad, origen, ubicacionId, mensaje) {
-            await fetch('/api/logs', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    origen,
-                    ubicacionId,
-                    severidad,
-                    tipoEvento: 'EventoSimulado',
-                    mensaje,
-                    mostrarEnPantallaPublica: true
-                })
-            });
-        }
-    </script>
+    <script src="app.js"></script>
 </body>
 </html>

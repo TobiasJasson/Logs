@@ -6,8 +6,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using System;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Infrastructure.Messaging
 {
@@ -17,7 +20,7 @@ namespace Infrastructure.Messaging
         private readonly IConfiguration _config;
         private readonly ILogger<RabbitMqConsumerHostedService> _logger;
         private IConnection? _connection;
-        private IModel? _channel;
+        private IChannel? _channel;
 
         public RabbitMqConsumerHostedService(
             IServiceProvider serviceProvider,
@@ -39,17 +42,32 @@ namespace Infrastructure.Messaging
             {
                 try
                 {
-                    var factory = new ConnectionFactory { HostName = hostName, DispatchConsumersAsync = true };
-                    _connection = factory.CreateConnection();
-                    _channel = _connection.CreateModel();
+                    var factory = new ConnectionFactory { HostName = hostName };
+                    _connection = await factory.CreateConnectionAsync(stoppingToken);
+                    _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
 
-                    // Exchange tipo Fanout o Topic para recibir los eventos de todos los grupos
-                    _channel.ExchangeDeclare(exchange: exchangeName, type: ExchangeType.Topic, durable: true);
-                    _channel.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false);
-                    _channel.QueueBind(queue: queueName, exchange: exchangeName, routingKey: "#");
+                    // Exchange tipo Topic para recibir los eventos de todos los grupos
+                    await _channel.ExchangeDeclareAsync(
+                        exchange: exchangeName,
+                        type: ExchangeType.Topic,
+                        durable: true,
+                        cancellationToken: stoppingToken);
+
+                    await _channel.QueueDeclareAsync(
+                        queue: queueName,
+                        durable: true,
+                        exclusive: false,
+                        autoDelete: false,
+                        cancellationToken: stoppingToken);
+
+                    await _channel.QueueBindAsync(
+                        queue: queueName,
+                        exchange: exchangeName,
+                        routingKey: "#",
+                        cancellationToken: stoppingToken);
 
                     var consumer = new AsyncEventingBasicConsumer(_channel);
-                    consumer.Received += async (model, ea) =>
+                    consumer.ReceivedAsync += async (model, ea) =>
                     {
                         var body = ea.Body.ToArray();
                         var json = Encoding.UTF8.GetString(body);
@@ -65,19 +83,28 @@ namespace Infrastructure.Messaging
                                 var useCase = scope.ServiceProvider.GetRequiredService<ProcesarEventoUseCase>();
                                 await useCase.EjecutarDesdeBusAsync(envelope);
                             }
-                            _channel.BasicAck(ea.DeliveryTag, false);
+                            await _channel.BasicAckAsync(ea.DeliveryTag, multiple: false, cancellationToken: stoppingToken);
                         }
                         catch (Exception ex)
                         {
                             _logger.LogError($"Error procesando mensaje de RabbitMQ: {ex.Message}");
-                            _channel.BasicNack(ea.DeliveryTag, false, false);
+                            await _channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false, cancellationToken: stoppingToken);
                         }
                     };
 
-                    _channel.BasicConsume(queue: queueName, autoAck: false, consumer: consumer);
+                    await _channel.BasicConsumeAsync(
+                        queue: queueName,
+                        autoAck: false,
+                        consumer: consumer,
+                        cancellationToken: stoppingToken);
+
                     _logger.LogInformation("Conectado a RabbitMQ. Escuchando eventos de todos los grupos...");
 
                     await Task.Delay(Timeout.Infinite, stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -89,8 +116,8 @@ namespace Infrastructure.Messaging
 
         public override void Dispose()
         {
-            _channel?.Close();
-            _connection?.Close();
+            _channel?.Dispose();
+            _connection?.Dispose();
             base.Dispose();
         }
     }
