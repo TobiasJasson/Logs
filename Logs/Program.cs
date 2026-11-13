@@ -110,11 +110,12 @@ var logsGetEndpoint = app.MapGet("/api/logs", async (
 if (requireJwt) logsGetEndpoint.RequireAuthorization();
 
 // 2. Consulta de un Log puntual por ID (usado por Location de 201 Created)
-app.MapGet("/api/logs/{id:guid}", async (Guid id, ConsultarLogsUseCase useCase) =>
+var logByIdEndpoint = app.MapGet("/api/logs/{id:guid}", async (Guid id, ConsultarLogsUseCase useCase) =>
 {
     var log = await useCase.ObtenerPorIdAsync(id);
     return log is not null ? Results.Ok(log) : Results.NotFound(new { error = "Log no encontrado." });
 });
+if (requireJwt) logByIdEndpoint.RequireAuthorization();
 
 // 3. Resumen de métricas para el Dashboard del Panel de Administración (Grupo 9)
 var resumenEndpoint = app.MapGet("/api/logs/resumen", async (ConsultarLogsUseCase useCase) =>

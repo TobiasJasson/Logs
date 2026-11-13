@@ -18,9 +18,17 @@ const titulos = {
     'Error': '[ERROR CRÍTICO]'
 };
 
+function escaparHtml(texto) {
+    if (texto === null || texto === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(texto);
+    return div.innerHTML;
+}
+
 function mostrarPopUp(log) {
     const card = document.createElement('div');
-    card.className = `popup-card ${log.severidad}`;
+    const sev = escaparHtml(log.severidad || 'Informacion');
+    card.className = `popup-card ${sev}`;
     const hora = new Date(log.timestampEmision).toLocaleTimeString();
 
     card.innerHTML = `
@@ -28,8 +36,8 @@ function mostrarPopUp(log) {
             <span>${titulos[log.severidad] || '[NOTIFICACIÓN]'}</span>
             <span class="close-btn" onclick="this.parentElement.parentElement.remove()">X</span>
         </div>
-        <div>${log.mensaje}</div>
-        <div class="popup-meta">Origen: <b>${log.origen}</b> | ID: <b>${log.ubicacionId}</b> | ${hora}</div>
+        <div>${escaparHtml(log.mensaje)}</div>
+        <div class="popup-meta">Origen: <b>${escaparHtml(log.origen)}</b> | ID: <b>${escaparHtml(log.ubicacionId)}</b> | ${hora}</div>
     `;
     popupContainer.prepend(card);
     setTimeout(() => { if (card.parentElement) card.remove(); }, 7000);
@@ -37,19 +45,23 @@ function mostrarPopUp(log) {
 
 function renderizarFilaVuelo(vuelo) {
     if (!vuelo || !vuelo.vueloId) return;
-    let tr = document.getElementById(`vuelo-${vuelo.vueloId}`);
+    const idLimpio = escaparHtml(vuelo.vueloId);
+    let tr = document.getElementById(`vuelo-${idLimpio}`);
     if (!tr) {
         tr = document.createElement('tr');
-        tr.id = `vuelo-${vuelo.vueloId}`;
+        tr.id = `vuelo-${idLimpio}`;
         tablaVuelos.prepend(tr);
     }
+    const sevVisual = escaparHtml(vuelo.severidadVisual || 'Informacion');
+    const estadoTexto = escaparHtml((vuelo.estado || '').toUpperCase());
+
     tr.innerHTML = `
-        <td>${vuelo.tipoOperacion || 'Salida'}</td>
-        <td><b>${vuelo.vueloId}</b></td>
-        <td>${vuelo.destino}</td>
-        <td>${vuelo.horario}</td>
-        <td><b>${vuelo.puerta}</b></td>
-        <td><span class="badge sev-${vuelo.severidadVisual || 'Informacion'}">${vuelo.estado.toUpperCase()}</span></td>
+        <td>${escaparHtml(vuelo.tipoOperacion || 'Salida')}</td>
+        <td><b>${idLimpio}</b></td>
+        <td>${escaparHtml(vuelo.destino)}</td>
+        <td>${escaparHtml(vuelo.horario)}</td>
+        <td><b>${escaparHtml(vuelo.puerta)}</b></td>
+        <td><span class="badge sev-${sevVisual}">${estadoTexto}</span></td>
     `;
 }
 
@@ -57,11 +69,12 @@ function agregarFilaPublica(log) {
     if (!log.esPublico) return;
     const tr = document.createElement('tr');
     const hora = new Date(log.timestampEmision).toLocaleTimeString();
+    const sev = escaparHtml(log.severidad || 'Informacion');
     tr.innerHTML = `
         <td>${hora}</td>
-        <td><b>${log.ubicacionId}</b></td>
-        <td>${log.tipoEvento}</td>
-        <td><span class="badge sev-${log.severidad}">${log.severidad.toUpperCase()}</span> ${log.mensaje}</td>
+        <td><b>${escaparHtml(log.ubicacionId)}</b></td>
+        <td>${escaparHtml(log.tipoEvento)}</td>
+        <td><span class="badge sev-${sev}">${sev.toUpperCase()}</span> ${escaparHtml(log.mensaje)}</td>
     `;
     tablaPublica.prepend(tr);
 }
@@ -70,7 +83,8 @@ function agregarBitacora(log) {
     const div = document.createElement('div');
     div.className = 'log-item';
     const hora = new Date(log.timestampEmision).toLocaleTimeString();
-    div.innerHTML = `<span class="badge sev-${log.severidad}">${log.severidad}</span> <b>[${hora}] ${log.origen} (${log.ubicacionId}):</b> ${log.mensaje}`;
+    const sev = escaparHtml(log.severidad || 'Informacion');
+    div.innerHTML = `<span class="badge sev-${sev}">${sev}</span> <b>[${hora}] ${escaparHtml(log.origen)} (${escaparHtml(log.ubicacionId)}):</b> ${escaparHtml(log.mensaje)}`;
     bitacoraInterna.prepend(div);
 }
 

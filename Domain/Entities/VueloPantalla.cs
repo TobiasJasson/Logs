@@ -11,7 +11,7 @@ namespace Domain.Entities
         public string VueloId { get; set; } = string.Empty;       // Identificador único (Clave en Mongo)
         public string TipoOperacion { get; set; } = "Salida";     // "Salida" o "Llegada"
         public string AerolineaOOrigen { get; set; } = "EZE";
-        public string Destino { get; set; } = " Por definir";
+        public string Destino { get; set; } = " Sin especificar";
         public string Horario { get; set; } = "--:--";
         public string Puerta { get; set; } = "-";
         public string Pista { get; set; } = "-";
