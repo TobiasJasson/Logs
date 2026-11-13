@@ -1455,19 +1455,12 @@ Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen toke
 
 ## 16. Limitaciones conocidas
 
-1. **Métricas del resumen sobre una muestra.** `GET /api/logs/resumen` calcula todas las métricas sobre los últimos 200 logs, no sobre el total de la base. Además, `autorizacionesOtorgadas` cuenta cualquier log con severidad `Aprobado` (por ejemplo, `PistaLiberada` o `VueloCreado`), y `alertasActivas` cuenta todas las alertas de esa muestra, estén vigentes o no.
-2. **La fila del vuelo se reemplaza completa.** Si un evento sobre un vuelo no incluye `destino`, `horario`, `puerta` o `pista`, la pantalla muestra los valores por defecto (sección 8.6) y se pierde el dato enviado anteriormente.
-3. **Cualquier evento con `vueloId` modifica el tablero.** Un evento de otro grupo que incluya `vueloId` en su `payload` (por ejemplo, de Equipaje o de Torre de Control) actualiza la fila del vuelo y, si no informa `estadoNuevo`, muestra el tipo del evento como estado.
-4. **Horario por defecto en hora del servidor.** Cuando el evento no informa `horario`, se usa la hora local del servidor; dentro de un contenedor Docker es la hora UTC.
-5. **Endpoints sin autenticación.** Solo `GET /api/logs` y `GET /api/logs/resumen` pueden protegerse. El canal SSE interno y `GET /api/logs/{id}` exponen el contenido completo de los logs sin token. Los navegadores no permiten enviar el encabezado `Authorization` con `EventSource`, por lo que proteger los streams requiere enviar el token por la URL.
-6. **Página pública y monitoreo en la misma vista.** `index.html` muestra en una sola página el tablero público, la bitácora interna, los PopUps y el simulador. Para una pantalla pública real conviene una página que solo use el canal público.
-7. **Conexión a MongoDB evaluada al iniciar.** Si MongoDB no está disponible al iniciar, el servicio permanece en memoria local hasta que se reinicie, aunque MongoDB vuelva a estar disponible.
-8. **Logs guardados en memoria mientras MongoDB está activo.** Si una inserción falla con MongoDB activo (por ejemplo, por un `eventId` duplicado enviado en simultáneo), el log se guarda en memoria y se notifica por SSE, pero las consultas leen de MongoDB y no lo encuentran.
-9. **Sin total de registros en la paginación.** `GET /api/logs` no informa cuántos registros o páginas hay en total.
-10. **Sin cola de mensajes fallidos.** Los mensajes inválidos se descartan (`Nack` sin reencolar).
-11. **Respuesta del envelope con `eventId` vacío.** Si el emisor no envía `eventId`, el registro se guarda con un identificador generado, pero la respuesta de `POST /api/logs/envelope` devuelve el valor recibido (GUID vacío).
-12. **Escalado horizontal.** Si se ejecutan varias instancias leyendo la misma cola, cada una procesa una parte de los eventos y los clientes SSE conectados a una instancia no reciben los eventos procesados por las otras. Para escalar se requiere, además de la cola compartida de persistencia, una cola exclusiva por instancia para alimentar los canales SSE.
-13. **Sin interconexión TCP/UDP propia.** El servicio se comunica por REST, RabbitMQ y SSE.
+1. **Página pública y monitoreo en la misma vista.** `index.html` muestra en una sola página el tablero público, la bitácora interna, los PopUps y el simulador para facilitar la demostración e integración del trabajo práctico. En un despliegue productivo, las pantallas de terminal utilizarían únicamente el canal público (`/api/pantallas/stream`).
+2. **Autenticación en canales SSE.** Cuando `Jwt:RequireJwtInLogs = true`, se protegen `GET /api/logs`, `GET /api/logs/{id}` y `GET /api/logs/resumen`. El canal SSE interno (`/api/logs/stream-interno`) permanece abierto porque la API estándar `EventSource` de los navegadores no soporta el envío del encabezado `Authorization: Bearer`.
+3. **Conexión a MongoDB evaluada al iniciar.** Si MongoDB no está disponible cuando arranca el microservicio, el repositorio opera en modo de memoria local acotada (hasta 1000 registros) durante esa ejecución.
+4. **Sin total global de páginas en el listado.** `GET /api/logs` devuelve el arreglo paginado según `page` y `pageSize`, sin incluir un metadato adicional con el conteo total de páginas.
+5. **Sin cola de mensajes fallidos (DLQ).** Los mensajes de RabbitMQ con JSON inválido o sin campos obligatorios se descartan mediante `Nack` (`requeue: false`) y se registran en el log de consola del servicio.
+6. **Escalado horizontal de SSE.** Si se ejecutan múltiples instancias detrás de un balanceador, cada instancia mantiene en memoria las conexiones SSE de sus propios clientes.
 
 ---
 
