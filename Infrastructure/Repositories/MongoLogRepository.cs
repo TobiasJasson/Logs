@@ -11,6 +11,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace Infrastructure.Repositories
@@ -171,31 +172,52 @@ namespace Infrastructure.Repositories
             return _inMemoryLogs.Any(x => x.EventId == eventId);
         }
 
-        public async Task<IEnumerable<LogEntry>> GetFilteredAsync(LogFilterDto filter)
+        public async Task<IEnumerable<LogEntry>> GetFilteredAsync(LogFilterDto filtro)
         {
-            int page = Math.Max(1, filter.Page);
-            int pageSize = Math.Clamp(filter.PageSize, 1, 200);
+            int page = filtro.Page < 1 ? 1 : filtro.Page;
+            int pageSize = filtro.PageSize < 1 ? 50 : (filtro.PageSize > 200 ? 200 : filtro.PageSize);
             int skip = (page - 1) * pageSize;
+
+            DateTime? desde = filtro.FechaDesde;
+            DateTime? hasta = filtro.FechaHasta;
+
+            if (desde.HasValue && hasta.HasValue && desde.Value > hasta.Value)
+            {
+                (desde, hasta) = (hasta, desde);
+            }
 
             if (_logsCollection != null)
             {
                 try
                 {
                     var builder = Builders<LogEntry>.Filter;
-                    var mongoFilter = builder.Empty;
+                    var filterDef = builder.Empty;
 
-                    if (filter.FechaDesde.HasValue)
-                        mongoFilter &= builder.Gte(x => x.TimestampEmision, filter.FechaDesde.Value);
-                    if (filter.FechaHasta.HasValue)
-                        mongoFilter &= builder.Lte(x => x.TimestampEmision, filter.FechaHasta.Value);
-                    if (!string.IsNullOrWhiteSpace(filter.Origen))
-                        mongoFilter &= builder.Eq(x => x.Origen, filter.Origen);
-                    if (!string.IsNullOrWhiteSpace(filter.TipoEvento))
-                        mongoFilter &= builder.Eq(x => x.TipoEvento, filter.TipoEvento);
-                    if (!string.IsNullOrWhiteSpace(filter.Severidad))
-                        mongoFilter &= builder.Eq(x => x.Severidad, filter.Severidad);
+                    if (desde.HasValue)
+                        filterDef &= builder.Gte(x => x.TimestampEmision, desde.Value.ToUniversalTime());
 
-                    return await _logsCollection.Find(mongoFilter)
+                    if (hasta.HasValue)
+                        filterDef &= builder.Lte(x => x.TimestampEmision, hasta.Value.ToUniversalTime());
+
+                    if (!string.IsNullOrWhiteSpace(filtro.Origen))
+                    {
+                        var regexOrigen = new BsonRegularExpression($"^{Regex.Escape(filtro.Origen.Trim())}$", "i");
+                        filterDef &= builder.Regex(x => x.Origen, regexOrigen);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(filtro.TipoEvento))
+                    {
+                        var regexTipo = new BsonRegularExpression($"^{Regex.Escape(filtro.TipoEvento.Trim())}$", "i");
+                        filterDef &= builder.Regex(x => x.TipoEvento, regexTipo);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(filtro.Severidad))
+                    {
+                        var regexSev = new BsonRegularExpression($"^{Regex.Escape(filtro.Severidad.Trim())}$", "i");
+                        filterDef &= builder.Regex(x => x.Severidad, regexSev);
+                    }
+
+                    return await _logsCollection.Find(filterDef)
                         .SortByDescending(x => x.TimestampEmision)
                         .Skip(skip)
                         .Limit(pageSize)
@@ -203,23 +225,28 @@ namespace Infrastructure.Repositories
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Fallo consulta en MongoDB. Leyendo desde memoria local.");
+                    _logger.LogWarning(ex, "Error consultando MongoDB. Leyendo desde memoria local.");
                 }
             }
 
             var query = _inMemoryLogs.AsEnumerable();
-            if (filter.FechaDesde.HasValue)
-                query = query.Where(x => x.TimestampEmision >= filter.FechaDesde.Value);
-            if (filter.FechaHasta.HasValue)
-                query = query.Where(x => x.TimestampEmision <= filter.FechaHasta.Value);
-            if (!string.IsNullOrWhiteSpace(filter.Origen))
-                query = query.Where(x => x.Origen.Equals(filter.Origen, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(filter.TipoEvento))
-                query = query.Where(x => x.TipoEvento.Equals(filter.TipoEvento, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(filter.Severidad))
-                query = query.Where(x => x.Severidad.Equals(filter.Severidad, StringComparison.OrdinalIgnoreCase));
 
-            return query.OrderByDescending(x => x.TimestampEmision).Skip(skip).Take(pageSize).ToList();
+            if (desde.HasValue)
+                query = query.Where(x => x.TimestampEmision >= desde.Value.ToUniversalTime());
+            if (hasta.HasValue)
+                query = query.Where(x => x.TimestampEmision <= hasta.Value.ToUniversalTime());
+            if (!string.IsNullOrWhiteSpace(filtro.Origen))
+                query = query.Where(x => x.Origen.Equals(filtro.Origen.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(filtro.TipoEvento))
+                query = query.Where(x => x.TipoEvento.Equals(filtro.TipoEvento.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(filtro.Severidad))
+                query = query.Where(x => x.Severidad.Equals(filtro.Severidad.Trim(), StringComparison.OrdinalIgnoreCase));
+
+            return query
+                .OrderByDescending(x => x.TimestampEmision)
+                .Skip(skip)
+                .Take(pageSize)
+                .ToList();
         }
 
         public async Task<IEnumerable<LogEntry>> GetRecentPublicEventsAsync(int count = 20)
@@ -252,8 +279,13 @@ namespace Infrastructure.Repositories
             {
                 try
                 {
+                    var builder = Builders<LogEntry>.Filter;
+                    var filter = builder.Regex(x => x.Origen, new BsonRegularExpression($"^{Regex.Escape(origen.Trim())}$", "i")) &
+                                 builder.Regex(x => x.TipoEvento, new BsonRegularExpression($"^{Regex.Escape(tipoEvento.Trim())}$", "i")) &
+                                 builder.Regex(x => x.UbicacionId, new BsonRegularExpression($"^{Regex.Escape(ubicacionId.Trim())}$", "i"));
+
                     var ultimo = await _logsCollection
-                        .Find(x => x.Origen == origen && x.TipoEvento == tipoEvento && x.UbicacionId == ubicacionId)
+                        .Find(filter)
                         .SortByDescending(x => x.TimestampEmision)
                         .FirstOrDefaultAsync();
                     return ultimo?.TimestampEmision;
@@ -265,9 +297,9 @@ namespace Infrastructure.Repositories
             }
 
             var memUltimo = _inMemoryLogs
-                .Where(x => x.Origen.Equals(origen, StringComparison.OrdinalIgnoreCase) &&
-                            x.TipoEvento.Equals(tipoEvento, StringComparison.OrdinalIgnoreCase) &&
-                            x.UbicacionId.Equals(ubicacionId, StringComparison.OrdinalIgnoreCase))
+                .Where(x => x.Origen.Equals(origen.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                            x.TipoEvento.Equals(tipoEvento.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                            x.UbicacionId.Equals(ubicacionId.Trim(), StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(x => x.TimestampEmision)
                 .FirstOrDefault();
 
@@ -277,25 +309,28 @@ namespace Infrastructure.Repositories
         public async Task<VueloPantalla?> GetVueloPantallaByIdAsync(string vueloId)
         {
             if (string.IsNullOrWhiteSpace(vueloId)) return null;
+            string idNorm = vueloId.Trim().ToUpperInvariant();
 
             if (_vuelosCollection != null)
             {
                 try
                 {
-                    return await _vuelosCollection.Find(x => x.VueloId == vueloId).FirstOrDefaultAsync();
+                    var regexId = new BsonRegularExpression($"^{Regex.Escape(idNorm)}$", "i");
+                    return await _vuelosCollection.Find(Builders<VueloPantalla>.Filter.Regex(x => x.VueloId, regexId)).FirstOrDefaultAsync();
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Fallo lectura de vuelo {VueloId} en MongoDB.", vueloId);
+                    _logger.LogWarning(ex, "Fallo lectura de vuelo {VueloId} en MongoDB.", idNorm);
                 }
             }
 
-            _inMemoryVuelos.TryGetValue(vueloId, out var vuelo);
+            _inMemoryVuelos.TryGetValue(idNorm, out var vuelo);
             return vuelo;
         }
 
         public async Task UpsertVueloPantallaAsync(VueloPantalla vuelo)
         {
+            vuelo.VueloId = vuelo.VueloId.Trim().ToUpperInvariant();
             _inMemoryVuelos[vuelo.VueloId] = vuelo;
 
             if (_vuelosCollection != null)
@@ -351,15 +386,22 @@ namespace Infrastructure.Repositories
                     var builder = Builders<LogEntry>.Filter;
                     long total = await _logsCollection.CountDocumentsAsync(builder.Empty);
                     long otorgadas = await _logsCollection.CountDocumentsAsync(
-                        builder.Regex(x => x.TipoEvento, new MongoDB.Bson.BsonRegularExpression("Otorgada", "i")));
+                        builder.Regex(x => x.TipoEvento, new BsonRegularExpression("Otorgada", "i")));
                     long denegadas = await _logsCollection.CountDocumentsAsync(
-                        builder.Regex(x => x.TipoEvento, new MongoDB.Bson.BsonRegularExpression("Denegada", "i")));
-                    long alertas = await _logsCollection.CountDocumentsAsync(builder.Eq(x => x.Severidad, "Alerta"));
-                    long errores = await _logsCollection.CountDocumentsAsync(builder.Eq(x => x.Severidad, "Error"));
+                        builder.Regex(x => x.TipoEvento, new BsonRegularExpression("Denegada", "i")));
+                    long alertas = await _logsCollection.CountDocumentsAsync(
+                        builder.Regex(x => x.Severidad, new BsonRegularExpression("^Alerta$", "i")));
+                    long errores = await _logsCollection.CountDocumentsAsync(
+                        builder.Regex(x => x.Severidad, new BsonRegularExpression("^Error$", "i")));
 
-                    var porOrigen = await _logsCollection.Aggregate()
-                        .Group(x => x.Origen, g => new { Origen = g.Key, Cantidad = g.Count() })
-                        .ToListAsync();
+                    var porOrigenRaw = await _logsCollection.Aggregate()
+                      .Group(x => x.Origen, g => new { Origen = g.Key, Cantidad = g.Count() })
+                      .ToListAsync();
+
+                    var porComponente = porOrigenRaw
+                        .Where(x => !string.IsNullOrWhiteSpace(x.Origen))
+                        .GroupBy(x => x.Origen.Trim(), StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(g => g.First().Origen.Trim(), g => g.Sum(x => x.Cantidad), StringComparer.OrdinalIgnoreCase);
 
                     return new DashboardResumenDto
                     {
@@ -369,9 +411,7 @@ namespace Infrastructure.Repositories
                         AlertasActivas = (int)alertas,
                         ErroresRegistrados = (int)errores,
                         VuelosEnCurso = vuelosEnCurso,
-                        LogsPorComponente = porOrigen
-                            .Where(x => !string.IsNullOrEmpty(x.Origen))
-                            .ToDictionary(x => x.Origen, x => x.Cantidad)
+                        LogsPorComponente = porComponente
                     };
                 }
                 catch (Exception ex)
@@ -390,8 +430,9 @@ namespace Infrastructure.Repositories
                 ErroresRegistrados = lista.Count(l => l.Severidad.Equals("Error", StringComparison.OrdinalIgnoreCase)),
                 VuelosEnCurso = vuelosEnCurso,
                 LogsPorComponente = lista
-                    .GroupBy(l => l.Origen)
-                    .ToDictionary(g => g.Key, g => g.Count())
+                    .Where(l => !string.IsNullOrWhiteSpace(l.Origen))
+                    .GroupBy(l => l.Origen.Trim(), StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.First().Origen.Trim(), g => g.Count(), StringComparer.OrdinalIgnoreCase)
             };
         }
     }

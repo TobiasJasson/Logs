@@ -45,7 +45,7 @@ function mostrarPopUp(log) {
 
 function renderizarFilaVuelo(vuelo) {
     if (!vuelo || !vuelo.vueloId) return;
-    const idLimpio = escaparHtml(vuelo.vueloId);
+    const idLimpio = escaparHtml(String(vuelo.vueloId).trim().toUpperCase());
     let tr = document.getElementById(`vuelo-${idLimpio}`);
     if (!tr) {
         tr = document.createElement('tr');
@@ -104,6 +104,9 @@ fetch(`${API_BASE_URL}/api/pantallas/eventos`)
 
 // 2. Canal SSE Público (Pantallas Públicas: actualiza vuelos y avisos públicos)
 const ssePublico = new EventSource(`${API_BASE_URL}/api/pantallas/stream`);
+const badgeEstado = document.getElementById('conn-status');
+ssePublico.onopen = () => { if (badgeEstado) { badgeEstado.textContent = 'Conectado en Tiempo Real (SSE)'; badgeEstado.style.background = 'var(--aprobado)'; } };
+ssePublico.onerror = () => { if (badgeEstado) { badgeEstado.textContent = 'Reconectando SSE...'; badgeEstado.style.background = 'var(--alerta)'; } };
 ssePublico.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.vuelo) renderizarFilaVuelo(data.vuelo);
