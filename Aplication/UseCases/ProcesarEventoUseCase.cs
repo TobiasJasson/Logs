@@ -1,14 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Text.Json;
-using System.Threading.Tasks;
-using Aplication.Abstractions;
+﻿using Aplication.Abstractions;
 using Aplication.Config;
 using Aplication.DTOs;
 using Domain.Entities;
 using Domain.Enums;
+using System;
+using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace Aplication.UseCases
 {
@@ -28,111 +25,234 @@ namespace Aplication.UseCases
             _config = config;
         }
 
-        // 1. Flujo para eventos entrantes desde RabbitMQ (Envelope Estándar)
         public async Task<bool> EjecutarDesdeBusAsync(BusEventEnvelopeDto envelope)
         {
             if (string.IsNullOrWhiteSpace(envelope.Origen) || string.IsNullOrWhiteSpace(envelope.Tipo))
                 throw new ArgumentException("El origen y el tipo de evento son obligatorios.");
 
-            // Requerimiento No Funcional: Idempotencia por Timestamp, Origen y Tipo
-            var ultimoTimestamp = await _repository.GetLastTimestampAsync(envelope.Origen, envelope.Tipo);
-            if (ultimoTimestamp.HasValue && envelope.Timestamp <= ultimoTimestamp.Value)
+            if (envelope.Timestamp == default)
+                throw new ArgumentException("El timestamp de emisión es obligatorio para validar idempotencia.");
+
+            if (envelope.EventId == Guid.Empty)
+                envelope.EventId = Guid.NewGuid();
+            else if (await _repository.ExistsEventIdAsync(envelope.EventId))
+                return false;
+
+            DateTime tsNormalizado = TruncarMilisegundos(envelope.Timestamp.ToUniversalTime());
+            string ubicacion = ExtraerIdentificadorUbicacion(envelope.Payload);
+
+            var ultimoTimestamp = await _repository.GetLastTimestampAsync(envelope.Origen, envelope.Tipo, ubicacion);
+            if (ultimoTimestamp.HasValue && tsNormalizado <= TruncarMilisegundos(ultimoTimestamp.Value.ToUniversalTime()))
             {
-                return false; // Se descarta por duplicado o llegada fuera de orden
+                return false;
             }
 
-            var severidad = DeterminarSeveridadAutomatica(envelope.Tipo);
-            bool esPublico = _config.EventosPublicos.Contains(envelope.Tipo);
-            string payloadRaw = envelope.Payload.ValueKind != JsonValueKind.Undefined
-                ? envelope.Payload.GetRawText()
-                : "{}";
+            NivelSeveridad severidad = DeterminarSeveridadAutomatica(envelope.Tipo, envelope.Payload);
+            bool esPublico = _config.EsEventoPublico(envelope.Tipo);
+            string mensaje = ConstruirMensajeLegible(envelope);
+            DateTime ahoraUtc = DateTime.UtcNow;
 
-            var log = new LogEntry
+            var nuevoLog = new LogEntry
             {
-                EventId = envelope.EventId == Guid.Empty ? Guid.NewGuid() : envelope.EventId,
-                Origen = envelope.Origen,
-                TipoEvento = envelope.Tipo,
+                Id = Guid.NewGuid(),
+                EventId = envelope.EventId,
+                Origen = envelope.Origen.Trim(),
+                TipoEvento = envelope.Tipo.Trim(),
                 Severidad = severidad.ToString(),
-                Mensaje = ConstruirMensajeLegible(envelope.Origen, envelope.Tipo, envelope.Payload),
-                UbicacionId = ExtraerIdentificadorUbicacion(envelope.Payload),
-                TimestampEmision = envelope.Timestamp,
-                ExpiraEnUtc = DateTime.UtcNow.AddDays(_config.DiasRetencionLogs),
+                Mensaje = mensaje,
+                UbicacionId = ubicacion,
+                TimestampEmision = tsNormalizado,
+                FechaRegistroUtc = ahoraUtc,
+                ExpiraEnUtc = ahoraUtc.AddDays(_config.DiasRetencionLogs),
                 EsPublico = esPublico,
-                PayloadJson = payloadRaw
+                PayloadJson = envelope.Payload.ValueKind != JsonValueKind.Undefined
+                    ? envelope.Payload.GetRawText()
+                    : "{}"
             };
 
-            await _repository.SaveAsync(log);
-            await _notifier.NotificarEventoAsync(log); // Envía a Pantallas y PopUps en vivo
+            await _repository.SaveAsync(nuevoLog);
+
+            VueloPantalla? vueloActualizado = await ActualizarTableroVuelosSiCorrespondeAsync(envelope, nuevoLog);
+            await _notifier.NotificarEventoAsync(nuevoLog, vueloActualizado);
             return true;
         }
 
-        // 2. Flujo para invocación directa vía API / Método compartido
         public async Task<LogEntry> EjecutarDirectoAsync(DirectLogRequestDto dto)
         {
             if (string.IsNullOrWhiteSpace(dto.Origen) || string.IsNullOrWhiteSpace(dto.Mensaje))
                 throw new ArgumentException("El componente de origen y el mensaje son obligatorios.");
 
-            var log = new LogEntry
+            NivelSeveridad severidad = NormalizarSeveridad(dto.Severidad);
+            string tipo = string.IsNullOrWhiteSpace(dto.TipoEvento) ? "LogDirecto" : dto.TipoEvento.Trim();
+            bool esPublico = dto.MostrarEnPantallaPublica || _config.EsEventoPublico(tipo);
+            DateTime ahoraUtc = TruncarMilisegundos(DateTime.UtcNow);
+            string ubicacion = string.IsNullOrWhiteSpace(dto.UbicacionId) ? "General" : dto.UbicacionId.Trim();
+
+            var nuevoLog = new LogEntry
             {
+                Id = Guid.NewGuid(),
                 EventId = Guid.NewGuid(),
-                Origen = dto.Origen,
-                TipoEvento = string.IsNullOrWhiteSpace(dto.TipoEvento) ? "LogDirecto" : dto.TipoEvento,
-                Severidad = NormalizarSeveridad(dto.Severidad),
-                Mensaje = dto.Mensaje,
-                UbicacionId = string.IsNullOrWhiteSpace(dto.UbicacionId) ? "General" : dto.UbicacionId,
-                TimestampEmision = DateTime.UtcNow,
-                ExpiraEnUtc = DateTime.UtcNow.AddDays(_config.DiasRetencionLogs),
-                EsPublico = dto.MostrarEnPantallaPublica || _config.EventosPublicos.Contains(dto.TipoEvento),
+                Origen = dto.Origen.Trim(),
+                TipoEvento = tipo,
+                Severidad = severidad.ToString(),
+                Mensaje = dto.Mensaje.Trim(),
+                UbicacionId = ubicacion,
+                TimestampEmision = ahoraUtc,
+                FechaRegistroUtc = ahoraUtc,
+                ExpiraEnUtc = ahoraUtc.AddDays(_config.DiasRetencionLogs),
+                EsPublico = esPublico,
                 PayloadJson = JsonSerializer.Serialize(dto)
             };
 
-            await _repository.SaveAsync(log);
-            await _notifier.NotificarEventoAsync(log);
-            return log;
-        }
+            await _repository.SaveAsync(nuevoLog);
 
-        private Severidad DeterminarSeveridadAutomatica(string tipoEvento)
-        {
-            var t = tipoEvento.ToLowerInvariant();
-            if (t.Contains("error") || t.Contains("denegada") || t.Contains("bloqueada") || t.Contains("timeout"))
-                return Severidad.Error;
-            if (t.Contains("alerta") || t.Contains("ocupada") || t.Contains("demora") || t.Contains("viento"))
-                return Severidad.Alerta;
-            if (t.Contains("otorgada") || t.Contains("liberada") || t.Contains("creado") || t.Contains("arribado") || t.Contains("aprobado"))
-                return Severidad.Aprobado;
+            VueloPantalla? vueloActualizado = null;
+            bool tieneDatosVuelo = !string.IsNullOrWhiteSpace(dto.EstadoVuelo) ||
+                                   !string.IsNullOrWhiteSpace(dto.Destino) ||
+                                   !string.IsNullOrWhiteSpace(dto.Puerta) ||
+                                   !string.IsNullOrWhiteSpace(dto.Horario) ||
+                                   tipo.Contains("Vuelo", StringComparison.OrdinalIgnoreCase);
 
-            return Severidad.Informacion;
-        }
-
-        private string NormalizarSeveridad(string sev)
-        {
-            return sev?.Trim().ToLowerInvariant() switch
+            if (tieneDatosVuelo && !ubicacion.Equals("General", StringComparison.OrdinalIgnoreCase))
             {
-                "error" => Severidad.Error.ToString(),
-                "alerta" => Severidad.Alerta.ToString(),
-                "aprobado" => Severidad.Aprobado.ToString(),
-                _ => Severidad.Informacion.ToString()
+                var existente = await _repository.GetVueloPantallaByIdAsync(ubicacion);
+
+                vueloActualizado = new VueloPantalla
+                {
+                    VueloId = ubicacion,
+                    AerolineaOOrigen = !string.IsNullOrWhiteSpace(existente?.AerolineaOOrigen) ? existente.AerolineaOOrigen : dto.Origen.Trim(),
+                    Destino = !string.IsNullOrWhiteSpace(dto.Destino) ? dto.Destino.Trim() : (existente?.Destino ?? "Sin especificar"),
+                    Horario = !string.IsNullOrWhiteSpace(dto.Horario) ? dto.Horario.Trim() : (existente?.Horario ?? "--:--"),
+                    Puerta = !string.IsNullOrWhiteSpace(dto.Puerta) ? dto.Puerta.Trim() : (existente?.Puerta ?? "-"),
+                    Pista = existente?.Pista ?? "-",
+                    Estado = !string.IsNullOrWhiteSpace(dto.EstadoVuelo) ? dto.EstadoVuelo.Trim() : (existente?.Estado ?? "En Horario"),
+                    TipoOperacion = !string.IsNullOrWhiteSpace(dto.TipoOperacion) ? dto.TipoOperacion.Trim() : (existente?.TipoOperacion ?? "Salida"),
+                    SeveridadVisual = nuevoLog.Severidad,
+                    UltimaActualizacionUtc = ahoraUtc
+                };
+                await _repository.UpsertVueloPantallaAsync(vueloActualizado);
+            }
+
+            await _notifier.NotificarEventoAsync(nuevoLog, vueloActualizado);
+            return nuevoLog;
+        }
+
+        private async Task<VueloPantalla?> ActualizarTableroVuelosSiCorrespondeAsync(BusEventEnvelopeDto envelope, LogEntry log)
+        {
+            string? vueloId = ExtraerCampoPayload(envelope.Payload, "vueloId");
+            bool esGestionVuelos = envelope.Origen.Equals("GestionVuelos", StringComparison.OrdinalIgnoreCase);
+            bool tipoMencionaVuelo = envelope.Tipo.Contains("Vuelo", StringComparison.OrdinalIgnoreCase);
+
+            if (string.IsNullOrWhiteSpace(vueloId) && !esGestionVuelos && !tipoMencionaVuelo)
+                return null;
+
+            string idFinal = !string.IsNullOrWhiteSpace(vueloId) ? vueloId : log.UbicacionId;
+            if (idFinal.Equals("Sistema", StringComparison.OrdinalIgnoreCase) || idFinal.StartsWith("Pista ", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            string? estadoExplicito = ExtraerCampoPayload(envelope.Payload, "estadoNuevo")
+                                   ?? ExtraerCampoPayload(envelope.Payload, "estado");
+
+            // Si otro grupo (ej. Equipaje) envía un evento con vueloId pero sin estadoNuevo, no modifica el tablero de vuelos
+            if (!esGestionVuelos && !tipoMencionaVuelo && string.IsNullOrWhiteSpace(estadoExplicito))
+                return null;
+
+            var existente = await _repository.GetVueloPantallaByIdAsync(idFinal);
+
+            string nuevoEstado = !string.IsNullOrWhiteSpace(estadoExplicito)
+                ? estadoExplicito
+                : (existente?.Estado ?? (envelope.Tipo.Equals("VueloCreado", StringComparison.OrdinalIgnoreCase) ? "Programado" : envelope.Tipo));
+
+            var vuelo = new VueloPantalla
+            {
+                VueloId = idFinal,
+                TipoOperacion = ExtraerCampoPayload(envelope.Payload, "tipoOperacion") ?? existente?.TipoOperacion ?? "Salida",
+                AerolineaOOrigen = ExtraerCampoPayload(envelope.Payload, "origen") ?? existente?.AerolineaOOrigen ?? "EZE",
+                Destino = ExtraerCampoPayload(envelope.Payload, "destino") ?? existente?.Destino ?? "Sin especificar",
+                Horario = ExtraerCampoPayload(envelope.Payload, "horario") ?? existente?.Horario ?? "--:--",
+                Puerta = ExtraerCampoPayload(envelope.Payload, "puerta") ?? existente?.Puerta ?? "-",
+                Pista = ExtraerCampoPayload(envelope.Payload, "pista") ?? existente?.Pista ?? "-",
+                Estado = nuevoEstado,
+                SeveridadVisual = !string.IsNullOrWhiteSpace(estadoExplicito) || existente == null ? log.Severidad : existente.SeveridadVisual,
+                UltimaActualizacionUtc = DateTime.UtcNow
             };
+
+            await _repository.UpsertVueloPantallaAsync(vuelo);
+            return vuelo;
+        }
+
+        private static DateTime TruncarMilisegundos(DateTime dt)
+        {
+            return new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, dt.Minute, dt.Second, dt.Millisecond, DateTimeKind.Utc);
+        }
+
+        private NivelSeveridad DeterminarSeveridadAutomatica(string tipoEvento, JsonElement payload)
+        {
+            string t = tipoEvento.ToLowerInvariant();
+            string estadoNuevo = (ExtraerCampoPayload(payload, "estadoNuevo") ?? "").ToLowerInvariant();
+            string combinado = $"{t} {estadoNuevo}";
+
+            if (combinado.Contains("error") || combinado.Contains("denegada") || combinado.Contains("bloqueada") || combinado.Contains("timeout") || combinado.Contains("cancelado"))
+                return NivelSeveridad.Error;
+
+            if (combinado.Contains("alerta") || combinado.Contains("ocupada") || combinado.Contains("demora") || combinado.Contains("viento"))
+                return NivelSeveridad.Alerta;
+
+            if (combinado.Contains("otorgada") || combinado.Contains("liberada") || combinado.Contains("creado") || combinado.Contains("arribado") || combinado.Contains("aprobado") || combinado.Contains("despegando"))
+                return NivelSeveridad.Aprobado;
+
+            return NivelSeveridad.Informacion;
+        }
+
+        private NivelSeveridad NormalizarSeveridad(string severidadStr)
+        {
+            if (string.IsNullOrWhiteSpace(severidadStr)) return NivelSeveridad.Informacion;
+
+            return severidadStr.Trim().ToLowerInvariant() switch
+            {
+                "error" => NivelSeveridad.Error,
+                "alerta" or "warning" => NivelSeveridad.Alerta,
+                "aprobado" or "ok" or "success" => NivelSeveridad.Aprobado,
+                _ => NivelSeveridad.Informacion
+            };
+        }
+
+        private static string? ExtraerCampoPayload(JsonElement payload, string propName)
+        {
+            if (payload.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in payload.EnumerateObject())
+                {
+                    if (prop.Name.Equals(propName, StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                    {
+                        var val = prop.Value.GetString();
+                        if (!string.IsNullOrWhiteSpace(val)) return val.Trim();
+                    }
+                }
+            }
+            return null;
         }
 
         private string ExtraerIdentificadorUbicacion(JsonElement payload)
         {
-            if (payload.ValueKind == JsonValueKind.Object)
-            {
-                if (payload.TryGetProperty("vueloId", out var v)) return v.ToString();
-                if (payload.TryGetProperty("pista", out var p)) return $"Pista {p}";
-                if (payload.TryGetProperty("ubicacionId", out var u)) return u.ToString();
-            }
-            return "Sistema";
+            return ExtraerCampoPayload(payload, "vueloId")
+                ?? (ExtraerCampoPayload(payload, "pista") is string p ? $"Pista {p}" : null)
+                ?? ExtraerCampoPayload(payload, "ubicacionId")
+                ?? "Sistema";
         }
 
-        private string ConstruirMensajeLegible(string origen, string tipo, JsonElement payload)
+        private string ConstruirMensajeLegible(BusEventEnvelopeDto env)
         {
-            if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("mensaje", out var msg))
-                return msg.ToString();
+            string? msg = ExtraerCampoPayload(env.Payload, "mensaje");
+            if (!string.IsNullOrWhiteSpace(msg)) return msg;
 
-            var id = ExtraerIdentificadorUbicacion(payload);
-            return $"[{origen}] Evento '{tipo}' registrado sobre {id}.";
+            string? estadoNuevo = ExtraerCampoPayload(env.Payload, "estadoNuevo");
+            string? vueloId = ExtraerCampoPayload(env.Payload, "vueloId");
+            if (!string.IsNullOrWhiteSpace(vueloId) && !string.IsNullOrWhiteSpace(estadoNuevo))
+                return $"Vuelo {vueloId} cambió a estado: {estadoNuevo}";
+
+            string ubicacion = ExtraerIdentificadorUbicacion(env.Payload);
+            return $"[{env.Origen}] Evento '{env.Tipo}' registrado sobre {ubicacion}.";
         }
     }
 }

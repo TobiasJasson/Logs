@@ -19,13 +19,18 @@ namespace Aplication.UseCases
         }
 
         public async Task<IEnumerable<LogEntry>> EjecutarAsync(LogFilterDto filtro)
-        {
-            return await _repository.GetFilteredAsync(filtro);
-        }
+            => await _repository.GetFilteredAsync(filtro);
+
+        public async Task<LogEntry?> ObtenerPorIdAsync(Guid id)
+            => await _repository.GetByIdAsync(id);
 
         public async Task<IEnumerable<LogEntry>> ObtenerEventosPantallaPublicaAsync()
-        {
-            return await _repository.GetRecentPublicEventsAsync(30);
-        }
+            => await _repository.GetRecentPublicEventsAsync(30);
+
+        public async Task<IEnumerable<VueloPantalla>> ObtenerTableroVuelosAsync()
+            => await _repository.GetVuelosPantallaAsync();
+
+        public async Task<DashboardResumenDto> ObtenerResumenDashboardAsync()
+            => await _repository.GetResumenDashboardAsync();
     }
 }

@@ -1,6 +1,27 @@
 @Logs_HostAddress = http://localhost:5097
 
-GET {{Logs_HostAddress}}/weatherforecast/
+### 1. Health Check
+GET {{Logs_HostAddress}}/health
 Accept: application/json
 
-###
+### 2. Crear un Log Directo con PopUp de Aprobado y actualización de Vuelo
+POST {{Logs_HostAddress}}/api/logs
+Content-Type: application/json
+
+{
+  "origen": "GestionVuelos",
+  "ubicacionId": "AR1234",
+  "severidad": "Aprobado",
+  "tipoEvento": "EstadoVueloCambiado",
+  "mensaje": "Vuelo AR1234 embarcando en Puerta B4",
+  "mostrarEnPantallaPublica": true,
+  "destino": "Madrid (MAD)",
+  "horario": "18:45",
+  "puerta": "B4",
+  "estadoVuelo": "Embarcando",
+  "tipoOperacion": "Salida"
+}
+
+### 3. Consultar Resumen para Dashboard (Grupo 9)
+GET {{Logs_HostAddress}}/api/logs/resumen
+Accept: application/json

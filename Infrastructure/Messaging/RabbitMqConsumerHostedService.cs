@@ -35,6 +35,10 @@ namespace Infrastructure.Messaging
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             var hostName = _config["RabbitMq:Host"] ?? "localhost";
+            var port = int.TryParse(_config["RabbitMq:Port"], out var p) ? p : 5672;
+            var userName = _config["RabbitMq:Username"] ?? "guest";
+            var password = _config["RabbitMq:Password"] ?? "guest";
+            var virtualHost = _config["RabbitMq:VirtualHost"] ?? "/";
             var exchangeName = _config["RabbitMq:Exchange"] ?? "aeropuerto_events";
             var queueName = _config["RabbitMq:Queue"] ?? "grupo8_logs_queue";
 
@@ -42,11 +46,21 @@ namespace Infrastructure.Messaging
             {
                 try
                 {
-                    var factory = new ConnectionFactory { HostName = hostName };
+                    var factory = new ConnectionFactory
+                    {
+                        HostName = hostName,
+                        Port = port,
+                        UserName = userName,
+                        Password = password,
+                        VirtualHost = virtualHost
+                    };
+
                     _connection = await factory.CreateConnectionAsync(stoppingToken);
                     _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
 
-                    // Exchange tipo Topic para recibir los eventos de todos los grupos
+                    // Prefetch de 10 mensajes para no saturar la instancia
+                    await _channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 10, global: false, cancellationToken: stoppingToken);
+
                     await _channel.ExchangeDeclareAsync(
                         exchange: exchangeName,
                         type: ExchangeType.Topic,
@@ -87,7 +101,7 @@ namespace Infrastructure.Messaging
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError($"Error procesando mensaje de RabbitMQ: {ex.Message}");
+                            _logger.LogError(ex, "Error procesando mensaje de RabbitMQ: {Payload}", json);
                             await _channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false, cancellationToken: stoppingToken);
                         }
                     };
@@ -98,7 +112,7 @@ namespace Infrastructure.Messaging
                         consumer: consumer,
                         cancellationToken: stoppingToken);
 
-                    _logger.LogInformation("Conectado a RabbitMQ. Escuchando eventos de todos los grupos...");
+                    _logger.LogInformation("Conectado a RabbitMQ en {Host}:{Port}. Escuchando cola {Queue}...", hostName, port, queueName);
 
                     await Task.Delay(Timeout.Infinite, stoppingToken);
                 }
@@ -108,7 +122,7 @@ namespace Infrastructure.Messaging
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"RabbitMQ no disponible en '{hostName}' ({ex.Message}). Reintentando en 10s...");
+                    _logger.LogWarning("RabbitMQ no disponible en {Host}:{Port} ({Message}). Reintentando en 10s...", hostName, port, ex.Message);
                     await Task.Delay(10000, stoppingToken);
                 }
             }

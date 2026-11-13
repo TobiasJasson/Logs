@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace Domain.Enums
 {
-    public enum Severidad
+    public enum NivelSeveridad
     {
         Informacion, // Azul: Eventos generales, clima normal, cambios rutinarios
         Aprobado,    // Verde: AutorizacionOtorgada, PistaLiberada, VueloCreado

@@ -9,6 +9,6 @@ namespace Aplication.Abstractions
 {
     public interface IPantallaNotifier
     {
-        Task NotificarEventoAsync(LogEntry log);
+        Task NotificarEventoAsync(LogEntry log, VueloPantalla? vueloActualizado = null);
     }
 }
