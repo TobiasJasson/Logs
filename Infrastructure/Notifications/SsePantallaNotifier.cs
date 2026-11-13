@@ -2,47 +2,81 @@
 using Domain.Entities;
 using System;
 using System.Collections.Concurrent;
-using System.IO;
 using System.Text.Json;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace Infrastructure.Notifications
 {
+    public class SseSubscriber
+    {
+        public Channel<string> Canal { get; } = Channel.CreateBounded<string>(new BoundedChannelOptions(100)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest
+        });
+        public bool SoloPublicos { get; init; }
+    }
+
     public class SsePantallaNotifier : IPantallaNotifier
     {
-        private readonly ConcurrentDictionary<Guid, StreamWriter> _subscriptores = new();
+        private readonly ConcurrentDictionary<Guid, SseSubscriber> _subscriptores = new();
+        private static readonly JsonSerializerOptions _jsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
 
-        public Guid SuscribirCliente(StreamWriter writer)
+        public (Guid Id, ChannelReader<string> Reader) SuscribirCliente(bool soloPublicos)
         {
             var id = Guid.NewGuid();
-            _subscriptores.TryAdd(id, writer);
-            return id;
+            var sub = new SseSubscriber { SoloPublicos = soloPublicos };
+            _subscriptores.TryAdd(id, sub);
+            return (id, sub.Canal.Reader);
         }
 
         public void DesuscribirCliente(Guid id)
         {
-            _subscriptores.TryRemove(id, out _);
+            if (_subscriptores.TryRemove(id, out var sub))
+            {
+                sub.Canal.Writer.TryComplete();
+            }
         }
 
-        public async Task NotificarEventoAsync(LogEntry log)
+        public Task NotificarEventoAsync(LogEntry log, VueloPantalla? vueloActualizado = null)
         {
-            var json = JsonSerializer.Serialize(log, new JsonSerializerOptions
+            // Payload limpio para pantallas públicas (sin PayloadJson interno)
+            var eventoPublico = new
             {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+                id = log.Id,
+                origen = log.Origen,
+                tipoEvento = log.TipoEvento,
+                severidad = log.Severidad,
+                mensaje = log.Mensaje,
+                ubicacionId = log.UbicacionId,
+                timestampEmision = log.TimestampEmision,
+                esPublico = log.EsPublico,
+                vuelo = vueloActualizado
+            };
 
-            foreach (var sub in _subscriptores)
+            string jsonPublico = JsonSerializer.Serialize(eventoPublico, _jsonOptions);
+            string jsonInterno = JsonSerializer.Serialize(new { log, vuelo = vueloActualizado }, _jsonOptions);
+
+            foreach (var kvp in _subscriptores)
             {
-                try
+                var sub = kvp.Value;
+                if (sub.SoloPublicos)
                 {
-                    await sub.Value.WriteAsync($"data: {json}\n\n");
-                    await sub.Value.FlushAsync();
+                    if (log.EsPublico)
+                    {
+                        sub.Canal.Writer.TryWrite(jsonPublico);
+                    }
                 }
-                catch
+                else
                 {
-                    _subscriptores.TryRemove(sub.Key, out _);
+                    sub.Canal.Writer.TryWrite(jsonInterno);
                 }
             }
+
+            return Task.CompletedTask;
         }
     }
 }

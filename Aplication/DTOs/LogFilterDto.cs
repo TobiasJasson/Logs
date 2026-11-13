@@ -13,5 +13,7 @@ namespace Aplication.DTOs
         public string? Origen { get; set; }
         public string? TipoEvento { get; set; }
         public string? Severidad { get; set; }
+        public int Page { get; set; } = 1;
+        public int PageSize { get; set; } = 50;
     }
 }

@@ -9,26 +9,40 @@
 <body>
     <header class="main-header">
         <div>
-            <h1>Aeropuerto Internacional UAI — Pantallas Públicas</h1>
-            <small>Grupo 8: Logs Centralizados, Notificaciones y Pantallas en Tiempo Real</small>
+            <h1>Aeropuerto Internacional UAI — Pantallas Públicas de Vuelos</h1>
+            <small>Grupo 8: Logs Centralizados, Notificaciones y Tablero Salidas/Llegadas en Tiempo Real</small>
         </div>
         <div id="conn-status" class="status-badge">Conectado en Tiempo Real (SSE)</div>
     </header>
 
-    <!-- Contenedor flotante donde se disparan los PopUps (Información, Aprobado, Alerta, Error) -->
     <div id="popup-container"></div>
 
     <main class="grid">
         <section class="panel">
-            <h2>Tablero Público de Operaciones y Vuelos (Salidas / Llegadas)</h2>
+            <h2>Tablero de Salidas y Llegadas (Estado por Vuelo)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Operación</th>
+                        <th>Vuelo</th>
+                        <th>Destino / Origen</th>
+                        <th>Horario</th>
+                        <th>Puerta</th>
+                        <th>Estado</th>
+                    </tr>
+                </thead>
+                <tbody id="tabla-vuelos"></tbody>
+            </table>
+
+            <hr class="divider">
+            <h2>Avisos Públicos del Aeropuerto</h2>
             <table>
                 <thead>
                     <tr>
                         <th>Horario</th>
-                        <th>Origen</th>
-                        <th>ID / Vuelo / Pista</th>
+                        <th>Sector / Vuelo</th>
                         <th>Evento</th>
-                        <th>Estado / Mensaje</th>
+                        <th>Aviso</th>
                     </tr>
                 </thead>
                 <tbody id="tabla-publica"></tbody>
@@ -37,15 +51,15 @@
 
         <section class="panel">
             <h2>Simulador de Pruebas (PopUps y API)</h2>
-            <p class="subtitle">Dispara eventos de prueba hacia la API para verificar los 4 PopUps y su persistencia:</p>
+            <p class="subtitle">Prueba los 4 tipos de PopUps, el tablero de vuelos y la bitácora interna:</p>
             <div class="btn-group">
-                <button class="btn-info" onclick="simular('Informacion', 'Meteorologia', 'Pista 09L', 'Viento 12 km/h, visibilidad óptima')">Info</button>
-                <button class="btn-aprobado" onclick="simular('Aprobado', 'TorreControl', 'AR1234', 'Autorización de despegue otorgada')">Aprobado</button>
-                <button class="btn-alerta" onclick="simular('Alerta', 'GestionVuelos', 'AR5500', 'Demora de 20 min por carga de equipaje')">Alerta</button>
-                <button class="btn-error" onclick="simular('Error', 'TorreControl', 'Pista 09L', 'Pista bloqueada por ráfagas de viento cruzado')">Error</button>
+                <button class="btn-info" onclick="simularVuelo('Informacion', 'GestionVuelos', 'AR1234', 'Roma (FCO)', '21:15', 'C2', 'Programado', 'Vuelo AR1234 programado en horario')">Info (Vuelo)</button>
+                <button class="btn-aprobado" onclick="simularVuelo('Aprobado', 'TorreControl', 'AR1234', 'Roma (FCO)', '21:15', 'C2', 'Despegando', 'Autorización de despegue otorgada en Pista 09L')">Aprobado</button>
+                <button class="btn-alerta" onclick="simularVuelo('Alerta', 'GestionVuelos', 'LA450', 'Santiago (SCL)', '19:30', 'A4', 'Demorado', 'Demora de 20 min por carga de equipaje')">Alerta</button>
+                <button class="btn-error" onclick="simularErrorInterno()">Error Interno (Solo Bitácora)</button>
             </div>
             <hr class="divider">
-            <h3>Bitácora Interna en Vivo</h3>
+            <h3>Bitácora Interna Completa (Grupo 8 / Grupo 9)</h3>
             <div id="bitacora-interna" class="log-box"></div>
         </section>
     </main>

@@ -10,7 +10,7 @@ namespace Aplication.Config
     {
         public int DiasRetencionLogs { get; set; } = 30;
 
-        public HashSet<string> EventosPublicos { get; set; } = new()
+        public List<string> EventosPublicos { get; set; } = new()
         {
             "EstadoVueloCambiado",
             "VueloCreado",
@@ -20,5 +20,10 @@ namespace Aplication.Config
             "AutorizacionDenegada",
             "ReporteClimatico"
         };
+
+        public bool EsEventoPublico(string tipoEvento)
+        {
+            return EventosPublicos.Exists(e => e.Equals(tipoEvento, StringComparison.OrdinalIgnoreCase));
+        }
     }
 }

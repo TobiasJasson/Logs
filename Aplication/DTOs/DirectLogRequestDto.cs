@@ -14,5 +14,10 @@ namespace Aplication.DTOs
         public string TipoEvento { get; set; } = "LogManual";
         public string Mensaje { get; set; } = string.Empty;
         public bool MostrarEnPantallaPublica { get; set; } = false;
+        public string? Destino { get; set; }
+        public string? Horario { get; set; }
+        public string? Puerta { get; set; }
+        public string? EstadoVuelo { get; set; }
+        public string? TipoOperacion { get; set; }
     }
 }
