@@ -1,5 +1,4 @@
 ﻿using Aplication.Abstractions;
-using Aplication.Config;
 using Aplication.DTOs;
 using Domain.Entities;
 using Microsoft.Extensions.Configuration;
@@ -30,7 +29,6 @@ namespace Infrastructure.Repositories
 
         public MongoLogRepository(
             IConfiguration config,
-            LogsBusinessConfig businessConfig,
             ILogger<MongoLogRepository> logger)
         {
             _logger = logger;

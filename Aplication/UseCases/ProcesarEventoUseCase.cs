@@ -139,25 +139,25 @@ namespace Aplication.UseCases
 
         private async Task<VueloPantalla?> ActualizarTableroVuelosSiCorrespondeAsync(BusEventEnvelopeDto envelope, LogEntry log)
         {
-            string? vueloId = ExtraerCampoPayload(envelope.Payload, "vueloId");
             bool esGestionVuelos = envelope.Origen.Equals("GestionVuelos", StringComparison.OrdinalIgnoreCase);
             bool tipoMencionaVuelo = envelope.Tipo.Contains("Vuelo", StringComparison.OrdinalIgnoreCase);
 
-            if (string.IsNullOrWhiteSpace(vueloId) && !esGestionVuelos && !tipoMencionaVuelo)
+            // Solo eventos de GestionVuelos o cuyo tipo mencione "Vuelo" modifican el tablero
+            if (!esGestionVuelos && !tipoMencionaVuelo)
                 return null;
 
+            string? vueloId = ExtraerCampoPayload(envelope.Payload, "vueloId");
             string idFinal = !string.IsNullOrWhiteSpace(vueloId) ? vueloId : log.UbicacionId;
-            if (idFinal.Equals("Sistema", StringComparison.OrdinalIgnoreCase) || idFinal.StartsWith("Pista ", StringComparison.OrdinalIgnoreCase))
-                return null;
 
-            string? estadoExplicito = ExtraerCampoPayload(envelope.Payload, "estadoNuevo")
-                                   ?? ExtraerCampoPayload(envelope.Payload, "estado");
-
-            // Si otro grupo (ej. Equipaje) envía un evento con vueloId pero sin estadoNuevo, no modifica el tablero de vuelos
-            if (!esGestionVuelos && !tipoMencionaVuelo && string.IsNullOrWhiteSpace(estadoExplicito))
+            if (string.IsNullOrWhiteSpace(idFinal) ||
+                idFinal.Equals("Sistema", StringComparison.OrdinalIgnoreCase) ||
+                idFinal.StartsWith("Pista ", StringComparison.OrdinalIgnoreCase))
                 return null;
 
             var existente = await _repository.GetVueloPantallaByIdAsync(idFinal);
+
+            string? estadoExplicito = ExtraerCampoPayload(envelope.Payload, "estadoNuevo")
+                                   ?? ExtraerCampoPayload(envelope.Payload, "estado");
 
             string nuevoEstado = !string.IsNullOrWhiteSpace(estadoExplicito)
                 ? estadoExplicito
@@ -223,10 +223,17 @@ namespace Aplication.UseCases
             {
                 foreach (var prop in payload.EnumerateObject())
                 {
-                    if (prop.Name.Equals(propName, StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.String)
+                    if (prop.Name.Equals(propName, StringComparison.OrdinalIgnoreCase))
                     {
-                        var val = prop.Value.GetString();
-                        if (!string.IsNullOrWhiteSpace(val)) return val.Trim();
+                        if (prop.Value.ValueKind == JsonValueKind.String)
+                        {
+                            var val = prop.Value.GetString();
+                            if (!string.IsNullOrWhiteSpace(val)) return val.Trim();
+                        }
+                        else if (prop.Value.ValueKind == JsonValueKind.Number)
+                        {
+                            return prop.Value.GetRawText().Trim();
+                        }
                     }
                 }
             }
