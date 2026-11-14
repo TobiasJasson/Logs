@@ -190,12 +190,12 @@ Paso a paso:
 
 1. El endpoint recibe un `DirectLogRequestDto` y llama a `EjecutarDirectoAsync`.
 2. Si `origen` o `mensaje` están vacíos, se lanza `ArgumentException` y el endpoint responde `400`.
-3. La severidad se normaliza: `error`, `alerta` y `aprobado` (sin distinguir mayúsculas) se convierten en `Error`, `Alerta` y `Aprobado`; cualquier otro valor se guarda como `Informacion`.
-4. Si no se informa `tipoEvento` se usa `LogDirecto`; si no se informa `ubicacionId` se usa `General`.
+3. La severidad se normaliza sin distinguir mayúsculas: `error` se convierte en `Error`; `alerta` o `warning` en `Alerta`; `aprobado`, `ok` o `success` en `Aprobado`; cualquier otro valor, o un valor vacío, se guarda como `Informacion`.
+4. Si no se informa `tipoEvento` se usa `LogManual` (si se envía vacío, `LogDirecto`); si no se informa `ubicacionId` se usa `General`.
 5. El `timestampEmision` es la hora del servidor (UTC, truncada a milisegundos).
 6. `esPublico` es verdadero si `mostrarEnPantallaPublica = true` o si el tipo está en la lista de eventos públicos.
 7. Se guarda el log.
-8. Si se informó `estadoVuelo`, o el `tipoEvento` contiene la palabra `Vuelo`, se actualiza la fila del tablero cuyo `vueloId` es el `ubicacionId` (sección 8.6).
+8. Si el cuerpo trae datos de vuelo (`estadoVuelo`, `destino`, `puerta` u `horario`) o el `tipoEvento` contiene la palabra `Vuelo`, y además `ubicacionId` no es `General`, se actualiza la fila del tablero cuyo `vueloId` es el `ubicacionId`. Los datos que no se envían se conservan de la fila existente (sección 8.6).
 9. Se notifica por SSE y se responde `201 Created`.
 
 En este flujo **no se aplica idempotencia**: cada llamada genera un nuevo registro.
@@ -206,10 +206,10 @@ En este flujo **no se aplica idempotencia**: cada llamada genera un nuevo regist
 Publicador --> RabbitMQ (aeropuerto_events) --> grupo8_logs_queue --+
                                                                     +--> ProcesarEventoUseCase.EjecutarDesdeBusAsync
 Cliente HTTP --> POST /api/logs/envelope ---------------------------+      1. Valida origen, tipo y timestamp
-                                                                           2. Descarta si el eventId ya existe
+                                                                           2. Genera el eventId si no viene; descarta si ya existe
                                                                            3. Descarta si el timestamp no es posterior al último
                                                                               del mismo origen + tipo + ubicación
-                                                                           4. Deduce la severidad a partir del tipo
+                                                                           4. Deduce la severidad a partir del tipo y del estado
                                                                            5. Determina si el evento es público
                                                                            6. Extrae la ubicación y el mensaje del payload
                                                                            7. Guarda el log
@@ -221,11 +221,11 @@ Paso a paso:
 
 1. Se valida que `origen` y `tipo` no estén vacíos y que `timestamp` esté informado. Si no, se lanza `ArgumentException` (`400` por REST, `Nack` por RabbitMQ).
 2. El `timestamp` se convierte a UTC y se trunca a milisegundos, que es la precisión con la que MongoDB guarda las fechas.
-3. Si `eventId` está informado y ya existe un registro con ese valor, el evento se descarta.
+3. Si el `eventId` no viene o es vacío, el servicio genera uno nuevo. Si viene y ya existe un registro con ese valor, el evento se descarta.
 4. Se extrae la ubicación del `payload` (sección 8.5) y se busca el último `timestampEmision` registrado para la combinación `origen + tipo + ubicación`. Si el `timestamp` recibido es menor o igual, el evento se descarta.
-5. Se deduce la severidad a partir del texto del `tipo` (sección 8.4) y se determina si es público (sección 8.2).
-6. Se arma el `LogEntry`, guardando el `payload` original como texto en `payloadJson`, y se persiste.
-7. Si el `payload` contiene `vueloId`, o el `tipo` contiene la palabra `Vuelo`, se actualiza la fila del vuelo en el tablero (sección 8.6).
+5. Se deduce la severidad a partir del texto del `tipo` y del estado informado en el `payload` (`estadoNuevo` o, si no viene, `estado`) (sección 8.4), y se determina si es público (sección 8.2).
+6. Se arma el `LogEntry` (con `origen` y `tipo` sin espacios al inicio ni al final), guardando el `payload` original como texto en `payloadJson`, y se persiste.
+7. Si el evento corresponde a un vuelo, se actualiza su fila en el tablero combinando los datos nuevos con los existentes (sección 8.6).
 8. Se notifica por SSE. El método devuelve `true` si el evento se guardó y `false` si se descartó.
 
 ### 3.4 Flujo C: consultas
@@ -273,6 +273,7 @@ Como cada cliente tiene su propia cola, la notificación nunca bloquea al consum
 |---|---|
 | No hay `MongoDb:ConnectionString` o MongoDB no responde al iniciar | Se utiliza memoria local acotada (sección 3.8). Los datos se pierden al reiniciar. |
 | Falla una inserción en MongoDB | Se registra el error y el log se guarda en memoria local. |
+| Inserción con un `eventId` que ya existe (dos envíos simultáneos del mismo evento) | El índice único lo rechaza; el servicio lo registra como duplicado y no lo guarda en ningún lado. |
 | Falla una consulta en MongoDB | Se registra la advertencia y se responde con los datos de memoria local. |
 | RabbitMQ no disponible | Reintento cada 10 segundos; la API REST sigue funcionando. |
 | Un cliente SSE es lento o se desconecta | Solo se afecta su propia cola; el resto de los clientes sigue recibiendo. |
@@ -285,7 +286,7 @@ Cuando MongoDB no está disponible, el repositorio usa dos estructuras en memori
 - **Logs:** una cola concurrente que conserva como máximo **1000** registros; al superar ese número se eliminan los más antiguos.
 - **Tablero de vuelos:** un diccionario concurrente por `vueloId`.
 
-En este modo las búsquedas por `origen`, `tipo` y `severidad` no distinguen mayúsculas y minúsculas.
+Al igual que con MongoDB, en este modo las búsquedas por `origen`, `tipo` y `severidad` no distinguen mayúsculas y minúsculas.
 
 ---
 
@@ -367,7 +368,7 @@ Toda la configuración está en `Logs/appsettings.json`:
 | `RabbitMq:VirtualHost` | `/` | Virtual host. |
 | `RabbitMq:Exchange` | `aeropuerto_events` | Exchange tipo *topic*, durable. |
 | `RabbitMq:Queue` | `grupo8_logs_queue` | Cola durable propia del Grupo 8. |
-| `BusinessConfig:DiasRetencionLogs` | `30` | Días que se conserva cada log antes de su eliminación automática. |
+| `BusinessConfig:DiasRetencionLogs` | `30` | Días que se conserva cada log antes de su eliminación automática. Si se configura `0` o un valor negativo, se usan 30 días. |
 | `BusinessConfig:EventosPublicos` | Lista anterior | Tipos de evento que se muestran en las Pantallas Públicas (sección 8.2). |
 | `Jwt:Key` | Valor de desarrollo | Clave simétrica (HS256) con la que el Grupo 7 firma los tokens. Debe reemplazarse por la clave real acordada. |
 | `Jwt:Audience` | `logs-api` | `audience` que deben tener los tokens. |
@@ -463,18 +464,18 @@ Cada evento se persiste con la estructura `LogEntry`. En las respuestas JSON los
 
 ### 7.2 `VueloPantalla` (colección `TableroVuelos`)
 
-Cada vuelo ocupa una única fila del tablero. Cuando llega un evento del mismo vuelo, la fila se reemplaza completa (sección 8.6).
+Cada vuelo ocupa una única fila del tablero. Cuando llega un evento del mismo vuelo, la fila se actualiza con los datos recibidos y conserva los que el evento no trae (sección 8.6).
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `vueloId` | string | Identificador del vuelo (clave `_id` en MongoDB), por ejemplo `AR1234`. |
+| `vueloId` | string | Identificador del vuelo (clave `_id` en MongoDB), siempre en mayúsculas, por ejemplo `AR1234`. Un evento con `ar1234` actualiza la misma fila. |
 | `tipoOperacion` | string | `Salida` o `Llegada`. |
 | `aerolineaOOrigen` | string | Aerolínea, aeropuerto de origen o grupo emisor, según la vía de ingreso. |
 | `destino` | string | Destino del vuelo. |
 | `horario` | string | Horario programado, en el formato que envíe el emisor (por ejemplo `18:45`). |
 | `puerta` | string | Puerta de embarque. |
 | `pista` | string | Pista asignada. |
-| `estado` | string | Estado mostrado en pantalla (por ejemplo `Programado`, `Embarcando`, `Despegando`, `En Vuelo`, `Arribado`, `Demorado`). |
+| `estado` | string | Estado mostrado en pantalla (por ejemplo `Programado`, `Embarcando`, `Despegando`, `En Vuelo`, `Arribado`, `Demorado`, `Cancelado`). |
 | `severidadVisual` | string | Severidad usada para colorear el estado en la pantalla. |
 | `ultimaActualizacionUtc` | datetime (UTC) | Momento de la última actualización de la fila. |
 
@@ -482,13 +483,15 @@ Cada vuelo ocupa una única fila del tablero. Cuando llega un evento del mismo v
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `totalLogsRegistrados` | número | Cantidad de logs analizados (ver limitación en la sección 16). |
-| `autorizacionesOtorgadas` | número | Logs cuyo tipo contiene `Otorgada` o cuya severidad es `Aprobado`. |
-| `autorizacionesDenegadas` | número | Logs cuyo tipo contiene `Denegada`. |
-| `alertasActivas` | número | Logs con severidad `Alerta`. |
-| `erroresRegistrados` | número | Logs con severidad `Error`. |
-| `vuelosEnCurso` | número | Vuelos del tablero cuyo estado no es `Arribado`. |
-| `logsPorComponente` | objeto | Cantidad de logs por `origen`, por ejemplo `{ "TorreControl": 12 }`. |
+| `totalLogsRegistrados` | número | Cantidad total de logs guardados (no vencidos). |
+| `autorizacionesOtorgadas` | número | Logs cuyo tipo contiene `Otorgada` (sin distinguir mayúsculas). |
+| `autorizacionesDenegadas` | número | Logs cuyo tipo contiene `Denegada` (sin distinguir mayúsculas). |
+| `alertasActivas` | número | Logs con severidad `Alerta` (sin distinguir mayúsculas) dentro del período de retención. |
+| `erroresRegistrados` | número | Logs con severidad `Error` dentro del período de retención. |
+| `vuelosEnCurso` | número | Vuelos del tablero (entre los 50 actualizados más recientemente) cuyo estado no es `Arribado` ni `Cancelado`. |
+| `logsPorComponente` | objeto | Cantidad de logs por `origen`, por ejemplo `{ "TorreControl": 12 }`. Los orígenes que solo difieren en mayúsculas o espacios (`TorreControl`, `torrecontrol `) se suman en una misma entrada. |
+
+Con MongoDB, los conteos se calculan sobre toda la colección; en modo de memoria local, sobre los registros en memoria (hasta 1000).
 
 ### 7.4 Severidades
 
@@ -499,7 +502,7 @@ Las severidades están definidas en la enumeración `NivelSeveridad` (`Domain/En
 | `Informacion` | Azul | Eventos generales o rutinarios | Reporte climático normal, cambio de estado de vuelo |
 | `Aprobado` | Verde | Operación autorizada o completada | `AutorizacionOtorgada`, `PistaLiberada`, `VueloCreado` |
 | `Alerta` | Amarillo | Situación que requiere atención | Demora, pista ocupada, viento fuerte |
-| `Error` | Rojo | Rechazo o falla | `AutorizacionDenegada`, `PistaBloqueada`, timeout entre servicios |
+| `Error` | Rojo | Rechazo o falla | `AutorizacionDenegada`, `PistaBloqueada`, vuelo cancelado, timeout entre servicios |
 
 ---
 
@@ -524,7 +527,7 @@ Antes de guardar un envelope, el servicio realiza dos controles:
 1. **Por `eventId`:** si ya existe un registro con el mismo `eventId`, el evento se descarta. Esto cubre el caso de un mismo mensaje entregado dos veces.
 2. **Por `timestamp`:** busca el último `timestampEmision` registrado para la combinación **`origen` + `tipo` + `ubicación`** (la ubicación se obtiene del `payload`, sección 8.5). Si el `timestamp` recibido es **menor o igual** al último guardado, el evento se descarta por considerarse duplicado o llegado fuera de orden.
 
-Ambas comparaciones de tiempo se hacen con precisión de milisegundos.
+Las comparaciones de tiempo se hacen con precisión de milisegundos, y la comparación de `origen`, `tipo` y ubicación no distingue mayúsculas y minúsculas (`TorreControl` y `torrecontrol` se consideran el mismo origen).
 
 La respuesta REST de un evento descartado indica `procesado: false`; en RabbitMQ el mensaje se confirma (`Ack`) sin guardarse.
 
@@ -538,21 +541,26 @@ Consecuencias para los emisores:
 
 ### 8.4 Severidad automática (solo envelope)
 
-La severidad se deduce del texto del `tipo`, sin distinguir mayúsculas. Se evalúan las reglas en este orden:
+La severidad se deduce del texto del `tipo` junto con el estado informado en el `payload` (el campo `estadoNuevo` o, si no viene, el campo `estado`), sin distinguir mayúsculas. De esta forma, un mismo tipo `EstadoVueloCambiado` se muestra con distinto color según el estado al que pasa el vuelo. Se evalúan las reglas en este orden:
 
-| Prioridad | El tipo contiene | Severidad |
+| Prioridad | El tipo o el estado contiene | Severidad |
 |---|---|---|
-| 1 | `error`, `denegada`, `bloqueada`, `timeout` | `Error` |
+| 1 | `error`, `denegada`, `bloqueada`, `timeout`, `cancelado` | `Error` |
 | 2 | `alerta`, `ocupada`, `demora`, `viento` | `Alerta` |
-| 3 | `otorgada`, `liberada`, `creado`, `arribado`, `aprobado` | `Aprobado` |
+| 3 | `otorgada`, `liberada`, `creado`, `arribado`, `aprobado`, `despegando` | `Aprobado` |
 | 4 | Ninguna de las anteriores | `Informacion` |
+
+La palabra `demora` también se encuentra dentro de `Demorado`, por lo que un vuelo demorado se muestra como `Alerta`.
 
 Ejemplos:
 
 | Tipo | Severidad resultante | Público |
 |---|---|---|
 | `VueloCreado` | Aprobado | Sí |
-| `EstadoVueloCambiado` | Informacion | Sí |
+| `EstadoVueloCambiado` (sin `estadoNuevo`, o con `Embarcando`) | Informacion | Sí |
+| `EstadoVueloCambiado` con `estadoNuevo: "Demorado"` | Alerta | Sí |
+| `EstadoVueloCambiado` con `estadoNuevo: "Despegando"` o `"Arribado"` | Aprobado | Sí |
+| `EstadoVueloCambiado` con `estadoNuevo: "Cancelado"` | Error | Sí |
 | `PistaBloqueada` | Error | Sí |
 | `PistaLiberada` | Aprobado | Sí |
 | `AutorizacionOtorgada` | Aprobado | Sí |
@@ -568,29 +576,51 @@ En el log directo la severidad la indica el emisor (sección 9.3).
 ### 8.5 Ubicación y mensaje (solo envelope)
 
 - **Ubicación:** se toma del `payload` según esta prioridad: `vueloId` (valor tal cual), `pista` (se guarda como `Pista <valor>`), `ubicacionId` (valor tal cual). Si no existe ninguna, se guarda `Sistema`.
-- **Mensaje:** si el `payload` incluye el campo `mensaje`, se utiliza ese texto. En caso contrario se genera `[<origen>] Evento '<tipo>' registrado sobre <ubicación>.`
+- **Mensaje:** se elige según esta prioridad:
+  1. El campo `mensaje` del `payload`, si viene.
+  2. Si vienen `vueloId` y `estadoNuevo`: `Vuelo <VUELOID> cambió a estado: <estadoNuevo>.` (con el identificador en mayúsculas).
+  3. En otro caso: `[<origen>] Evento '<tipo>' registrado sobre <ubicación>.`
+
+Los campos del `payload` se buscan sin distinguir mayúsculas en el nombre (`vueloId` o `VueloId`). Se aceptan valores de texto, numéricos o booleanos: `"vueloId": "AR1234"` y `"vueloId": 1234` se reconocen; los objetos, listas y valores `null` se ignoran.
+
+Normalización: el `vueloId` se guarda en mayúsculas (`ar1234` pasa a `AR1234`) y la pista también (`Pista 09L`). Los demás valores se guardan tal como llegan, sin espacios al inicio ni al final.
 
 ### 8.6 Tablero de vuelos
 
-El tablero muestra una fila por vuelo y se actualiza automáticamente.
+El tablero muestra una fila por vuelo y se actualiza automáticamente. Cada actualización **combina** los datos recibidos con los que la fila ya tenía: si un evento no trae un campo (por ejemplo `destino` o `puerta`), se conserva el valor anterior. Solo cuando el vuelo es nuevo y el dato nunca se informó se muestra el valor por defecto.
 
-**Desde un envelope**, se actualiza la fila si el `payload` contiene `vueloId` o si el `tipo` contiene la palabra `Vuelo` (y la ubicación no es `Sistema`). Los datos de la fila se toman del `payload`:
+**Desde un envelope**, se decide si el evento modifica el tablero con estos pasos:
 
-| Campo de la fila | Campo del `payload` | Valor si no viene |
+1. Solo modifican el tablero los eventos cuyo `origen` es `GestionVuelos` o cuyo `tipo` contiene la palabra `Vuelo` (sin distinguir mayúsculas). Cualquier otro evento, aunque traiga `vueloId` o un campo `estado`, queda registrado en la bitácora pero no cambia el tablero. Por ejemplo, una `AutorizacionOtorgada` de Torre de Control o un `EquipajeDespachado` de Equipaje con `vueloId` no modifican la fila del vuelo.
+2. Se identifica el vuelo: es el `vueloId` del `payload` o, si no viene, la ubicación extraída (sección 8.5). Si el resultado es `Sistema`, `General` o una pista (`Pista ...`), el tablero no se modifica.
+3. El identificador se pasa a mayúsculas y se busca la fila existente para combinar los datos.
+
+Los datos de la fila se obtienen así:
+
+| Campo de la fila | Se toma de | Si no viene, se conserva el valor anterior; si el vuelo es nuevo |
 |---|---|---|
-| `vueloId` | `vueloId` | La ubicación extraída (sección 8.5) |
+| `vueloId` | `vueloId` del `payload` | La ubicación extraída (sección 8.5) |
 | `tipoOperacion` | `tipoOperacion` | `Salida` |
-| `aerolineaOOrigen` | `origen` | `EZE` |
-| `destino` | `destino` | `Aeropuerto Destino` |
-| `horario` | `horario` | Hora actual del servidor (`HH:mm`) |
-| `puerta` | `puerta` | `B2` |
-| `pista` | `pista` | `09L` |
-| `estado` | `estadoNuevo`, o en su defecto `estado` | El `tipo` del evento |
-| `severidadVisual` | - | Severidad deducida del tipo |
+| `aerolineaOOrigen` | `origen` del `payload` (en mayúsculas) | `EZE` |
+| `destino` | `destino` | `Sin especificar` |
+| `horario` | `horario` | `--:--` |
+| `puerta` | `puerta` (en mayúsculas) | `-` |
+| `pista` | `pista` (en mayúsculas) | `-` |
+| `estado` | `estadoNuevo`, o en su defecto `estado` | `Programado` si el tipo es `VueloCreado`; en otro caso, el `tipo` del evento |
+| `severidadVisual` | Severidad del log (sección 8.4), solo si el evento trae un estado o el vuelo es nuevo | Se conserva la anterior |
 
-**Desde un log directo**, se actualiza la fila si se informa `estadoVuelo` o si el `tipoEvento` contiene la palabra `Vuelo`. El `vueloId` es el `ubicacionId` y los datos se toman de `destino`, `horario`, `puerta`, `estadoVuelo` y `tipoOperacion` del cuerpo. Si no vienen se usan, respectivamente, `Nacional / Internacional`, la hora actual, `A1`, la severidad y `Salida`. En `aerolineaOOrigen` se guarda el `origen` del log.
+**Desde un log directo**, se actualiza la fila si el cuerpo trae `estadoVuelo`, `destino`, `puerta` u `horario`, o si el `tipoEvento` contiene la palabra `Vuelo`, siempre que `ubicacionId` no sea `General`, `Sistema` ni una pista (`Pista ...`). El `vueloId` es el `ubicacionId` en mayúsculas. Los datos se toman del cuerpo con la misma lógica de combinación:
 
-La fila se **reemplaza completa** en cada actualización. Por lo tanto, cada evento sobre un vuelo debe incluir todos los datos que se quieren mostrar (`destino`, `horario`, `puerta`, etc.); si un campo no viene, se muestra el valor por defecto de la tabla anterior.
+| Campo de la fila | Se toma de | Si no viene, se conserva el valor anterior; si el vuelo es nuevo |
+|---|---|---|
+| `tipoOperacion` | `tipoOperacion` | `Salida` |
+| `aerolineaOOrigen` | Se conserva el valor anterior | El `origen` del log |
+| `destino` | `destino` | `Sin especificar` |
+| `horario` | `horario` | `--:--` |
+| `puerta` | `puerta` | `-` |
+| `pista` | Se conserva el valor anterior | `-` |
+| `estado` | `estadoVuelo` | `En Horario` |
+| `severidadVisual` | Severidad del log | - |
 
 La fila actualizada se envía por SSE junto con el log en el campo `vuelo` (sección 10.9).
 
@@ -622,7 +652,7 @@ Los dos mecanismos pueden combinarse en un mismo grupo. En particular, el enunci
 | Nombres de propiedad | Se aceptan sin distinguir mayúsculas y minúsculas (`origen`, `Origen`). Se recomienda camelCase. |
 | Fechas | ISO 8601 en **UTC** con sufijo `Z`, por ejemplo `2026-10-18T15:30:00Z`. Es obligatorio para `timestamp` y recomendado en los filtros `fechaDesde` y `fechaHasta`. |
 | Identificadores | `eventId` debe ser un GUID válido (formato `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). |
-| Autenticación | Solo `GET /api/logs` y `GET /api/logs/resumen` pueden exigir token, cuando `Jwt:RequireJwtInLogs = true`. En ese caso se envía `Authorization: Bearer <token>` con un JWT emitido por el Grupo 7 y `audience = logs-api`. Se recomienda que los clientes ya lo envíen. |
+| Autenticación | Solo `GET /api/logs`, `GET /api/logs/{id}` y `GET /api/logs/resumen` pueden exigir token, cuando `Jwt:RequireJwtInLogs = true`. En ese caso se envía `Authorization: Bearer <token>` con un JWT emitido por el Grupo 7 y `audience = logs-api`. Se recomienda que los clientes ya lo envíen. |
 | CORS | El servicio permite cualquier origen, método y encabezado; las aplicaciones web pueden invocarlo y suscribirse a los streams desde otro dominio. |
 | Paginación | `GET /api/logs` devuelve 50 registros por página por defecto y como máximo 200 (parámetros `page` y `pageSize`). |
 
@@ -639,14 +669,16 @@ Content-Type: application/json
 |---|---|---|---|---|
 | `origen` | string | Sí | - | Nombre del grupo o componente emisor. Debe ser constante entre llamadas (por ejemplo `GestionVuelos`). |
 | `mensaje` | string | Sí | - | Texto legible que se mostrará en la bitácora y el PopUp. |
-| `severidad` | string | No | `Informacion` | Valores aceptados (sin distinguir mayúsculas): `Informacion`, `Aprobado`, `Alerta`, `Error`. Cualquier otro valor se guarda como `Informacion`. |
+| `severidad` | string | No | `Informacion` | Valores aceptados (sin distinguir mayúsculas): `Informacion`, `Aprobado` (o `ok`, `success`), `Alerta` (o `warning`), `Error`. Cualquier otro valor se guarda como `Informacion`. |
 | `tipoEvento` | string | No | `LogManual` | Clasificación del evento. Si coincide con un tipo público, el log se muestra en pantallas. Si contiene `Vuelo`, actualiza el tablero. |
-| `ubicacionId` | string | No | `General` | Vuelo, pista o nombre del método donde ocurrió. Si se actualiza el tablero, es el `vueloId`. |
+| `ubicacionId` | string | No | `General` | Vuelo, pista o nombre del método donde ocurrió. Si se actualiza el tablero, es el `vueloId` (se guarda en mayúsculas); con `General`, `Sistema` o `Pista ...` el tablero no se modifica. |
 | `mostrarEnPantallaPublica` | boolean | No | `false` | Fuerza la aparición en las Pantallas Públicas. |
-| `estadoVuelo` | string | No | - | Si se informa, actualiza el estado del vuelo en el tablero. |
+| `estadoVuelo` | string | No | - | Estado del vuelo a mostrar en el tablero. |
 | `destino` | string | No | - | Destino a mostrar en el tablero. |
 | `horario` | string | No | - | Horario a mostrar en el tablero. |
 | `puerta` | string | No | - | Puerta a mostrar en el tablero. |
+
+Basta con informar uno de los cuatro campos anteriores para que se actualice la fila del vuelo; los demás conservan su valor anterior (sección 8.6).
 | `tipoOperacion` | string | No | - | `Salida` o `Llegada`. |
 
 **Ejemplo: error técnico (solo bitácora interna)**
@@ -708,11 +740,11 @@ Si el emisor declara el exchange, debe hacerlo con los mismos parámetros (`topi
 
 | Campo | Tipo | Obligatorio | Descripción |
 |---|---|---|---|
-| `eventId` | GUID | Sí (recomendado) | Identificador único del evento. Si se omite o es vacío, el servicio genera uno, pero no puede detectar reenvíos del mismo mensaje. |
+| `eventId` | GUID | Sí (recomendado) | Identificador único del evento. Si se omite o es vacío, el servicio genera uno y lo devuelve en la respuesta REST, pero no puede detectar reenvíos del mismo mensaje. |
 | `tipo` | string | Sí | Tipo de evento. Define severidad y publicidad (secciones 8.2 y 8.4). |
 | `origen` | string | Sí | Grupo emisor. |
 | `timestamp` | datetime UTC | Sí | Momento de emisión (ver idempotencia en la sección 8.3). Si falta, el mensaje se rechaza. |
-| `payload` | objeto JSON | No | Datos del evento. Campos reconocidos: `mensaje`, `vueloId`, `pista`, `ubicacionId` y, para el tablero, `destino`, `origen`, `horario`, `puerta`, `tipoOperacion`, `estadoNuevo`, `estado`. Cualquier otro campo queda guardado en `payloadJson`. |
+| `payload` | objeto JSON | No | Datos del evento. Campos reconocidos (con valor de texto, número o booleano): `mensaje`, `vueloId`, `pista`, `ubicacionId` y, para el tablero, `destino`, `origen`, `horario`, `puerta`, `tipoOperacion`, `estadoNuevo`, `estado`. Cualquier otro campo queda guardado en `payloadJson`. |
 
 **Ejemplo: cambio de estado de un vuelo (Grupo 2)**
 
@@ -753,7 +785,8 @@ Como no existe cola de mensajes fallidos, los emisores deben validar el envelope
 | `origen` | Nombre estable del grupo en PascalCase, sin espacios: `TorreControl`, `GestionVuelos`, `PistasAeronaves`, `CheckIn`, `Equipaje`, `Meteorologia`, `Seguridad`, `PanelAdministracion`. |
 | `tipo` / `tipoEvento` | PascalCase descriptivo, en pasado o estado: `VueloCreado`, `PistaBloqueada`. Incluir palabras clave de la tabla 8.4 cuando se quiera una severidad determinada. |
 | `ubicacionId` / `payload.vueloId` / `payload.pista` | Usar siempre el mismo formato para el mismo recurso (`AR1234`, `09L`) para facilitar los filtros y para que el tablero agrupe correctamente. |
-| `payload.vueloId` | Solo incluirlo en eventos que deban modificar la fila del vuelo en el tablero (ver limitación en la sección 16). |
+| `payload.vueloId` | Puede enviarse como texto o número y en cualquier combinación de mayúsculas; el servicio lo normaliza a mayúsculas. Solo los eventos de `GestionVuelos`, o cuyo tipo contiene `Vuelo`, modifican el tablero (sección 8.6); el resto de los grupos puede incluir `vueloId` para que el log quede asociado al vuelo sin alterar la pantalla. |
+| `payload.estadoNuevo` | Usarlo en los cambios de estado de vuelo: define el estado mostrado en el tablero y el color (sección 8.4). |
 | `mensaje` | Frase completa, legible por un operador, sin datos sensibles. |
 | Fechas | Siempre UTC. |
 
@@ -957,7 +990,7 @@ Antes de dar por finalizada la integración, cada grupo debe comprobar:
 |---|---|---|---|---|---|
 | 1 | `GET` | `/health` | API Gateway, Docker | No | Estado del servicio. |
 | 2 | `GET` | `/api/logs` | Grupo 9 (Panel de Administración) | Si `RequireJwtInLogs = true` | Consulta de logs con filtros y paginación. |
-| 3 | `GET` | `/api/logs/{id}` | Grupo 9, cualquier grupo | No | Consulta de un log por su identificador. |
+| 3 | `GET` | `/api/logs/{id}` | Grupo 9, cualquier grupo | Si `RequireJwtInLogs = true` | Consulta de un log por su identificador. |
 | 4 | `GET` | `/api/logs/resumen` | Grupo 9 (dashboard) | Si `RequireJwtInLogs = true` | Métricas agregadas. |
 | 5 | `POST` | `/api/logs` | Cualquier grupo | No | Registro de un log directo. |
 | 6 | `POST` | `/api/logs/envelope` | Cualquier grupo, pruebas | No | Ingreso de un envelope del bus por HTTP. |
@@ -994,7 +1027,7 @@ Devuelve los registros ordenados por `timestampEmision` descendente, paginados. 
 | `page` | entero | `1` | Número de página, desde 1. Por defecto `1`. |
 | `pageSize` | entero | `50` | Registros por página, entre 1 y 200. Por defecto `50`. |
 
-Con MongoDB, los filtros `origen`, `tipo` y `severidad` son **exactos y sensibles a mayúsculas y minúsculas**. En el modo de memoria local no distinguen mayúsculas.
+Los filtros `origen`, `tipo` y `severidad` buscan el valor **exacto, sin distinguir mayúsculas y minúsculas** (`torrecontrol` encuentra `TorreControl`), tanto con MongoDB como en memoria local. Si `fechaDesde` es posterior a `fechaHasta`, el servicio intercambia ambos valores. Un `pageSize` menor que 1 se toma como 50 y uno mayor que 200 se toma como 200.
 
 **Solicitud (Postman / Insomnia)**
 
@@ -1070,7 +1103,7 @@ GET http://localhost:5097/api/logs/resumen
 }
 ```
 
-Las métricas se calculan sobre los **últimos 200 logs**, no sobre toda la base (sección 16).
+Con MongoDB, todas las métricas de logs se calculan sobre la colección completa (los registros dentro del período de retención). `vuelosEnCurso` se calcula sobre los 50 vuelos actualizados más recientemente.
 
 ### 10.5 `POST /api/logs` - Registrar un log directo
 
@@ -1156,6 +1189,8 @@ Content-Type: application/json
 ```json
 { "procesado": true, "eventId": "3fa85f64-5717-4562-b3fc-2c963f66afa6" }
 ```
+
+Si el envelope no traía `eventId`, la respuesta devuelve el identificador generado por el servicio.
 
 El registro resultante queda con `severidad = "Error"`, `ubicacionId = "Pista 09L"` y `esPublico = true`.
 
@@ -1304,6 +1339,9 @@ Los errores de validación propios del servicio tienen la forma `{ "error": "<me
 | 8 | Repetir la petición 6 con otro `eventId` y el mismo `timestamp` | `200` con `procesado: false` (timestamp no posterior). |
 | 9 | `POST /api/logs/envelope` sin `timestamp` | `400`. |
 | 10 | `POST /api/logs/envelope` con tipo `EstadoVueloCambiado` y `payload` con `vueloId`, `destino`, `horario`, `puerta` y `estadoNuevo` | `200`; el vuelo aparece en `GET /api/pantallas/vuelos` y se actualiza en la pantalla. |
+| 10b | Nuevo envelope del mismo vuelo con `estadoNuevo: "Demorado"` y sin `destino` ni `puerta` (otro `eventId` y `timestamp` posterior) | El estado pasa a `Demorado` en amarillo; `destino` y `puerta` se conservan. |
+| 10c | Envelope de `Equipaje` con tipo `EquipajeDespachado`, `vueloId` y `estado: "EnBodega"` | `200`; el log se guarda pero la fila del vuelo no cambia. |
+| 10d | Envelope de `GestionVuelos` con `vueloId: "ar1234"` (minúsculas) | Se actualiza la fila existente `AR1234`; no se crea una fila nueva. |
 | 11 | `POST /api/logs/envelope` con tipo `DemoraVuelo` | `200`; severidad `Alerta`; `esPublico: false`; no aparece en el canal público. |
 | 12 | `GET /api/logs?severidad=Error&pageSize=5` | `200`; como máximo 5 registros, incluido el de la prueba 6. |
 | 13 | `GET /api/logs?origen=Inexistente` | `200` con `[]`. |
@@ -1376,6 +1414,7 @@ La página `http://localhost:5097/` (archivo `wwwroot/index.html`, con la lógic
 
 | Área | Qué muestra | De dónde obtiene los datos |
 |---|---|---|
+| **Indicador de conexión** | Estado del canal SSE público: verde si está conectado, amarillo si está reconectando. | Eventos `onopen` y `onerror` del canal SSE público. |
 | **Tablero de Salidas y Llegadas** | Una fila por vuelo: operación, vuelo, destino, horario, puerta y estado coloreado según severidad. | Carga inicial con `GET /api/pantallas/vuelos`; actualización con el campo `vuelo` del canal SSE público. |
 | **Avisos Públicos del Aeropuerto** | Eventos públicos: hora, sector o vuelo, tipo y mensaje. | Carga inicial con `GET /api/pantallas/eventos`; actualización con el canal SSE público. |
 | **Bitácora Interna Completa** | Todos los logs, públicos o no. | Carga inicial con `GET /api/pantallas/eventos`; actualización con el canal SSE interno. |
@@ -1404,7 +1443,7 @@ La API está configurada para validar tokens **JWT Bearer** emitidos por el Grup
 | `audience` esperado | `Jwt:Audience` (por defecto `logs-api`) |
 | Validación de emisor (`issuer`) | No se valida |
 | Validación de expiración | Sí |
-| Endpoints protegidos | `GET /api/logs` y `GET /api/logs/resumen`, solo si `Jwt:RequireJwtInLogs = true` |
+| Endpoints protegidos | `GET /api/logs`, `GET /api/logs/{id}` y `GET /api/logs/resumen`, solo si `Jwt:RequireJwtInLogs = true` |
 
 Formato del encabezado cuando se exija autenticación:
 
@@ -1426,7 +1465,7 @@ Ejemplo de contenido de un token válido para este servicio (flujo *client crede
 
 Para habilitar la protección se debe establecer `Jwt:RequireJwtInLogs = true` y configurar `Jwt:Key` con la clave real acordada con el Grupo 7. No se debe utilizar el valor de desarrollo en un entorno compartido.
 
-Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen token. Ver la sección 16 para las implicancias.
+Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen token. El canal SSE interno queda abierto porque `EventSource` no permite enviar el encabezado `Authorization` (sección 16).
 
 ---
 
@@ -1437,14 +1476,15 @@ Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen toke
 | Mensaje *"RabbitMQ no disponible... Reintentando en 10s"* | El broker no está en ejecución, o el host, puerto o credenciales son incorrectos. | Iniciar RabbitMQ o corregir la sección `RabbitMq`. El servicio se conecta automáticamente en el siguiente intento. La API REST no se ve afectada. |
 | Mensaje *"MongoDB no disponible... Operando con memoria local acotada"* | MongoDB no está en ejecución o la cadena de conexión es incorrecta. | Iniciar MongoDB y reiniciar el servicio: la conexión se evalúa solo al iniciar. |
 | Los logs desaparecen al reiniciar | El servicio está en modo de memoria local. | Configurar MongoDB (sección 5). |
-| `GET /api/logs` devuelve `[]` con filtros | Con MongoDB los filtros distinguen mayúsculas y minúsculas, o la página pedida no tiene datos. | Utilizar el valor exacto (`Error`, `Informacion`) y revisar `page`. |
+| `GET /api/logs` devuelve `[]` con filtros | El valor del filtro no coincide completo (por ejemplo `Torre` en lugar de `TorreControl`), o la página pedida no tiene datos. | Utilizar el valor completo (las mayúsculas no importan) y revisar `page`. |
 | `415 Unsupported Media Type` | Falta el encabezado `Content-Type`. | Enviar `Content-Type: application/json`. |
 | `400 Bad Request` en `POST /api/logs` | Falta `origen` o `mensaje`, o el JSON es inválido. | Revisar el cuerpo. |
 | `400 Bad Request` en el envelope | Falta `origen`, `tipo` o `timestamp`. | Completar el envelope. |
 | `procesado: false` en el envelope | Idempotencia: `eventId` repetido o `timestamp` no posterior al último del mismo origen, tipo y ubicación. | Enviar un `eventId` nuevo y un `timestamp` más reciente. |
 | `401 Unauthorized` | `RequireJwtInLogs = true` y el token falta, venció o no corresponde. | Solicitar un token al Grupo 7 con `audience = logs-api`. |
 | Un evento por RabbitMQ no aparece | JSON inválido, campos obligatorios vacíos, o descarte por idempotencia. | Revisar el log del servicio y validar el envelope. |
-| Un vuelo aparece con destino `Aeropuerto Destino` o puerta `B2` | El evento no incluía esos campos en el `payload` y se usaron los valores por defecto. | Enviar todos los datos del vuelo en cada evento (sección 8.6). |
+| Un vuelo aparece con destino `Sin especificar`, horario `--:--` o puerta `-` | Ningún evento de ese vuelo informó esos datos todavía. | Enviar `destino`, `horario` y `puerta` al menos en el primer evento del vuelo (por ejemplo, en `VueloCreado`); los siguientes eventos los conservan (sección 8.6). |
+| Un evento con `vueloId` no cambia el tablero | El evento no es de `GestionVuelos` y su tipo no menciona `Vuelo`. | Es el comportamiento esperado (sección 8.6). Los cambios de estado de vuelo los informa Gestión de Vuelos. |
 | Otros equipos no pueden conectarse | El servicio escucha solo en `localhost` o el firewall bloquea el puerto. | Iniciar con `--urls "http://0.0.0.0:5097"` y habilitar el puerto. |
 | El contenedor no se conecta a MongoDB o RabbitMQ | Dentro del contenedor, `localhost` es el propio contenedor. | Usar `host.docker.internal` o el nombre del contenedor en la misma red (sección 6.2). |
 | `docker build` falla al copiar los `.csproj` | Se ejecutó desde la carpeta `Logs/Logs`. | Ejecutar desde la raíz del repositorio con `-f Logs/Dockerfile`. |
@@ -1455,19 +1495,12 @@ Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen toke
 
 ## 16. Limitaciones conocidas
 
-1. **Métricas del resumen sobre una muestra.** `GET /api/logs/resumen` calcula todas las métricas sobre los últimos 200 logs, no sobre el total de la base. Además, `autorizacionesOtorgadas` cuenta cualquier log con severidad `Aprobado` (por ejemplo, `PistaLiberada` o `VueloCreado`), y `alertasActivas` cuenta todas las alertas de esa muestra, estén vigentes o no.
-2. **La fila del vuelo se reemplaza completa.** Si un evento sobre un vuelo no incluye `destino`, `horario`, `puerta` o `pista`, la pantalla muestra los valores por defecto (sección 8.6) y se pierde el dato enviado anteriormente.
-3. **Cualquier evento con `vueloId` modifica el tablero.** Un evento de otro grupo que incluya `vueloId` en su `payload` (por ejemplo, de Equipaje o de Torre de Control) actualiza la fila del vuelo y, si no informa `estadoNuevo`, muestra el tipo del evento como estado.
-4. **Horario por defecto en hora del servidor.** Cuando el evento no informa `horario`, se usa la hora local del servidor; dentro de un contenedor Docker es la hora UTC.
-5. **Endpoints sin autenticación.** Solo `GET /api/logs` y `GET /api/logs/resumen` pueden protegerse. El canal SSE interno y `GET /api/logs/{id}` exponen el contenido completo de los logs sin token. Los navegadores no permiten enviar el encabezado `Authorization` con `EventSource`, por lo que proteger los streams requiere enviar el token por la URL.
-6. **Página pública y monitoreo en la misma vista.** `index.html` muestra en una sola página el tablero público, la bitácora interna, los PopUps y el simulador. Para una pantalla pública real conviene una página que solo use el canal público.
-7. **Conexión a MongoDB evaluada al iniciar.** Si MongoDB no está disponible al iniciar, el servicio permanece en memoria local hasta que se reinicie, aunque MongoDB vuelva a estar disponible.
-8. **Logs guardados en memoria mientras MongoDB está activo.** Si una inserción falla con MongoDB activo (por ejemplo, por un `eventId` duplicado enviado en simultáneo), el log se guarda en memoria y se notifica por SSE, pero las consultas leen de MongoDB y no lo encuentran.
-9. **Sin total de registros en la paginación.** `GET /api/logs` no informa cuántos registros o páginas hay en total.
-10. **Sin cola de mensajes fallidos.** Los mensajes inválidos se descartan (`Nack` sin reencolar).
-11. **Respuesta del envelope con `eventId` vacío.** Si el emisor no envía `eventId`, el registro se guarda con un identificador generado, pero la respuesta de `POST /api/logs/envelope` devuelve el valor recibido (GUID vacío).
-12. **Escalado horizontal.** Si se ejecutan varias instancias leyendo la misma cola, cada una procesa una parte de los eventos y los clientes SSE conectados a una instancia no reciben los eventos procesados por las otras. Para escalar se requiere, además de la cola compartida de persistencia, una cola exclusiva por instancia para alimentar los canales SSE.
-13. **Sin interconexión TCP/UDP propia.** El servicio se comunica por REST, RabbitMQ y SSE.
+1. **Página pública y monitoreo en la misma vista.** `index.html` muestra en una sola página el tablero público, la bitácora interna, los PopUps y el simulador para facilitar la demostración e integración del trabajo práctico. En un despliegue productivo, las pantallas de terminal utilizarían únicamente el canal público (`/api/pantallas/stream`).
+2. **Autenticación en canales SSE.** Cuando `Jwt:RequireJwtInLogs = true`, se protegen `GET /api/logs`, `GET /api/logs/{id}` y `GET /api/logs/resumen`. El canal SSE interno (`/api/logs/stream-interno`) permanece abierto porque la API estándar `EventSource` de los navegadores no soporta el envío del encabezado `Authorization: Bearer`.
+3. **Conexión a MongoDB evaluada al iniciar.** Si MongoDB no está disponible cuando arranca el microservicio, el repositorio opera en modo de memoria local acotada (hasta 1000 registros) durante esa ejecución.
+4. **Sin total global de páginas en el listado.** `GET /api/logs` devuelve el arreglo paginado según `page` y `pageSize`, sin incluir un metadato adicional con el conteo total de páginas.
+5. **Sin cola de mensajes fallidos (DLQ).** Los mensajes de RabbitMQ con JSON inválido o sin campos obligatorios se descartan mediante `Nack` (`requeue: false`) y se registran en el log de consola del servicio.
+6. **Escalado horizontal de SSE.** Si se ejecutan múltiples instancias detrás de un balanceador, cada instancia mantiene en memoria las conexiones SSE de sus propios clientes.
 
 ---
 
@@ -1499,7 +1532,7 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 |---|---|---|---|
 | `BusEventEnvelopeDto` | `DTOs/BusEventEnvelopeDto.cs` | Envelope estándar del bus. | Deserializado en `RabbitMqConsumerHostedService` y recibido en `POST /api/logs/envelope`; procesado por `EjecutarDesdeBusAsync`. |
 | `DirectLogRequestDto` | `DTOs/DirectLogRequestDto.cs` | Cuerpo de un log directo. | Recibido en `POST /api/logs`; procesado por `EjecutarDirectoAsync`. |
-| `LogFilterDto` | `DTOs/LogFilterDto.cs` | Filtros y paginación de consulta. | Armado en `GET /api/logs`; usado por `GetFilteredAsync` y por `GetResumenDashboardAsync`. |
+| `LogFilterDto` | `DTOs/LogFilterDto.cs` | Filtros y paginación de consulta. | Armado en `GET /api/logs`; usado por `GetFilteredAsync`. |
 | `DashboardResumenDto` | `DTOs/DashboardResumenDto.cs` | Métricas del dashboard. | Armado por `GetResumenDashboardAsync`; devuelto por `GET /api/logs/resumen`. |
 
 **`ProcesarEventoUseCase`** (`UseCases/ProcesarEventoUseCase.cs`): ingesta de eventos.
@@ -1508,10 +1541,11 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 |---|---|---|
 | `EjecutarDesdeBusAsync(envelope)` | Flujo B completo (sección 3.3). Devuelve `true` si guardó y `false` si descartó. | `RabbitMqConsumerHostedService` (por cada mensaje) y endpoint `POST /api/logs/envelope`. |
 | `EjecutarDirectoAsync(dto)` | Flujo A completo (sección 3.2). Devuelve el `LogEntry` creado. | Endpoint `POST /api/logs`. |
-| `ActualizarTableroVuelosSiCorrespondeAsync` (privado) | Arma la fila del vuelo desde el `payload` y la guarda (sección 8.6). | `EjecutarDesdeBusAsync`. |
+| `ActualizarTableroVuelosSiCorrespondeAsync` (privado) | Decide si el envelope modifica el tablero, combina los datos del `payload` con la fila existente y la guarda (sección 8.6). | `EjecutarDesdeBusAsync`. |
 | `TruncarMilisegundos` (privado) | Recorta una fecha a milisegundos en UTC. | `EjecutarDesdeBusAsync` y `EjecutarDirectoAsync`. |
-| `DeterminarSeveridadAutomatica` (privado) | Deduce la severidad a partir del tipo (sección 8.4). | `EjecutarDesdeBusAsync`. |
+| `DeterminarSeveridadAutomatica` (privado) | Deduce la severidad a partir del tipo y del estado del `payload` (sección 8.4). Devuelve el nombre de la severidad como texto. | `EjecutarDesdeBusAsync`. |
 | `NormalizarSeveridad` (privado) | Convierte el texto recibido en una severidad válida. | `EjecutarDirectoAsync`. |
+| `ExtraerCampoPayload` (privado) | Devuelve el valor de un campo del `payload` como texto, buscando el nombre sin distinguir mayúsculas. Acepta valores de texto, numéricos y booleanos; si el campo no existe, está vacío o es de otro tipo, devuelve `null`. | `EjecutarDesdeBusAsync`, `ActualizarTableroVuelosSiCorrespondeAsync`, `ExtraerIdentificadorUbicacion` y `ConstruirMensajeLegible`. |
 | `ExtraerIdentificadorUbicacion` (privado) | Obtiene la ubicación del `payload` (sección 8.5). | `EjecutarDesdeBusAsync` y `ConstruirMensajeLegible`. |
 | `ConstruirMensajeLegible` (privado) | Obtiene o genera el mensaje del log (sección 8.5). | `EjecutarDesdeBusAsync`. |
 
@@ -1532,15 +1566,16 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 | Método | Función | Se llama desde |
 |---|---|---|
 | Constructor | Configura serializadores, se conecta y crea índices (sección 3.1). | Contenedor de dependencias, la primera vez que se necesita. |
-| `SaveAsync` | Inserta un log; si falla, lo guarda en memoria. | `EjecutarDesdeBusAsync`, `EjecutarDirectoAsync`. |
+| `SaveAsync` | Inserta un log; si el `eventId` ya existe lo ignora; si falla por otro motivo, lo guarda en memoria. | `EjecutarDesdeBusAsync`, `EjecutarDirectoAsync`. |
 | `GetByIdAsync` | Busca un log por `id`. | `ObtenerPorIdAsync`. |
 | `ExistsEventIdAsync` | Indica si ya existe un log con ese `eventId`. | `EjecutarDesdeBusAsync`. |
-| `GetFilteredAsync` | Filtra, ordena y pagina logs. | `EjecutarAsync`, `GetResumenDashboardAsync`. |
+| `GetFilteredAsync` | Filtra (sin distinguir mayúsculas), ordena y pagina logs; corrige el rango de fechas invertido y los valores de paginación fuera de rango. | `EjecutarAsync`. |
 | `GetRecentPublicEventsAsync` | Últimos eventos públicos. | `ObtenerEventosPantallaPublicaAsync`. |
 | `GetLastTimestampAsync` | Último `timestampEmision` por origen, tipo y ubicación. | `EjecutarDesdeBusAsync`. |
-| `UpsertVueloPantallaAsync` | Inserta o reemplaza la fila de un vuelo. | `EjecutarDirectoAsync`, `ActualizarTableroVuelosSiCorrespondeAsync`. |
+| `GetVueloPantallaByIdAsync` | Devuelve la fila actual de un vuelo, buscando el identificador sin distinguir mayúsculas, para combinarla con los datos nuevos. | `EjecutarDirectoAsync`, `ActualizarTableroVuelosSiCorrespondeAsync`. |
+| `UpsertVueloPantallaAsync` | Normaliza el `vueloId` a mayúsculas e inserta o reemplaza la fila del vuelo (ya combinada). | `EjecutarDirectoAsync`, `ActualizarTableroVuelosSiCorrespondeAsync`. |
 | `GetVuelosPantallaAsync` | Hasta 50 filas del tablero. | `ObtenerTableroVuelosAsync`, `GetResumenDashboardAsync`. |
-| `GetResumenDashboardAsync` | Calcula las métricas del dashboard. | `ObtenerResumenDashboardAsync`. |
+| `GetResumenDashboardAsync` | Calcula las métricas del dashboard con conteos y una agregación por `origen` en MongoDB (o sobre la memoria local). | `ObtenerResumenDashboardAsync`. |
 
 **`SsePantallaNotifier`** (`Notifications/SsePantallaNotifier.cs`): implementa `IPantallaNotifier`. Se registra como *singleton* (una única lista de suscriptores para toda la aplicación).
 
@@ -1581,7 +1616,7 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 | `agregarFilaPublica(log)` | Agrega un aviso a la tabla pública si `esPublico` es verdadero. | Carga inicial de `/api/pantallas/eventos` y canal SSE público. |
 | `agregarBitacora(log)` | Agrega una línea a la bitácora interna. | Carga inicial de `/api/pantallas/eventos` y canal SSE interno. |
 | Carga inicial | Dos `fetch` a `/api/pantallas/vuelos` y `/api/pantallas/eventos` al abrir la página. | Se ejecuta al cargar el script. |
-| `ssePublico` | `EventSource` sobre `/api/pantallas/stream`. | Se abre al cargar el script. |
+| `ssePublico` | `EventSource` sobre `/api/pantallas/stream`. Al conectarse, el indicador `conn-status` muestra *Conectado en Tiempo Real (SSE)* en verde; si se pierde la conexión, muestra *Reconectando SSE...* en amarillo mientras el navegador reintenta. | Se abre al cargar el script. |
 | `sseInterno` | `EventSource` sobre `/api/logs/stream-interno`. | Se abre al cargar el script. |
 | `simularVuelo(...)` | Envía un `POST /api/logs` de tipo `EstadoVueloCambiado` con datos de vuelo. | Botones Info, Aprobado y Alerta de `index.html`. |
 | `simularErrorInterno()` | Envía un `POST /api/logs` de error no público. | Botón Error Interno de `index.html`. |
