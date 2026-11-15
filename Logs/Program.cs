@@ -53,7 +53,21 @@ builder.Configuration.GetSection("BusinessConfig").Bind(businessConfig);
 builder.Services.AddSingleton(businessConfig);
 
 // INVERSIÓN DE DEPENDENCIAS (DIP)
-builder.Services.AddSingleton<ILogRepository, MongoLogRepository>();
+var proveedorPersistencia = builder.Configuration["Persistencia:Proveedor"]
+                         ?? builder.Configuration["DatabaseProvider"]
+                         ?? "Postgres";
+
+if (proveedorPersistencia.Equals("Postgres", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<PostgresLogRepository>();
+    builder.Services.AddSingleton<ILogRepository>(sp => sp.GetRequiredService<PostgresLogRepository>());
+    builder.Services.AddHostedService<PostgresLimpiezaHostedService>();
+}
+else
+{
+    builder.Services.AddSingleton<ILogRepository, MongoLogRepository>();
+}
+
 builder.Services.AddSingleton<SsePantallaNotifier>();
 builder.Services.AddSingleton<IPantallaNotifier>(sp => sp.GetRequiredService<SsePantallaNotifier>());
 
