@@ -30,7 +30,7 @@ Este repositorio contiene el servicio desarrollado por el **Grupo 8** del proyec
 
 Los demás grupos (Torre de Control, Gestión de Vuelos, Pistas y Aeronaves, Equipaje, Meteorología, Seguridad, Panel de Administración, entre otros) informan a este servicio los eventos relevantes de su operación. El servicio se encarga de:
 
-1. **Registrar** cada evento en una base de datos centralizada (MongoDB) con una política de retención automática.
+1. **Registrar** cada evento en una base de datos centralizada con una política de retención automática. En la infraestructura compartida del curso se usa **PostgreSQL** (schema `logs`); para desarrollo local también puede usarse **MongoDB** (sección 5).
 2. **Clasificar** cada evento según su severidad: `Informacion`, `Aprobado`, `Alerta` o `Error`.
 3. **Descartar duplicados** y eventos llegados fuera de orden (idempotencia).
 4. **Mantener un tablero de vuelos** con el estado actual de cada vuelo (una fila por vuelo), a partir de los eventos recibidos.
@@ -91,7 +91,11 @@ Logs/
 |-- Infrastructure/                        Implementaciones concretas
 |   |-- Messaging/RabbitMqConsumerHostedService.cs
 |   |-- Notifications/SsePantallaNotifier.cs
-|   `-- Repositories/MongoLogRepository.cs
+|   |-- Repositories/
+|   |   |-- PostgresLogRepository.cs       Persistencia en PostgreSQL (infraestructura compartida)
+|   |   |-- PostgresLimpiezaHostedService.cs  Borrado periódico de logs vencidos en PostgreSQL
+|   |   `-- MongoLogRepository.cs          Persistencia en MongoDB (desarrollo local)
+|   `-- Scripts/logs_postgres.sql          Script de las tablas de PostgreSQL
 `-- Logs/                                  Proyecto web (API.csproj)
     |-- Program.cs                         Composición, middleware y endpoints
     |-- Dockerfile                         Imagen del servicio
@@ -119,12 +123,12 @@ Logs (API)  ---->  Aplication  ---->  Domain
  ---------------                         ----------------                              ------------
  RabbitMQ (envelope) ---> RabbitMqConsumerHostedService --+
                                                           |
- POST /api/logs/envelope ---------------------------------+--> ProcesarEventoUseCase --> MongoLogRepository (MongoDB / memoria)
+ POST /api/logs/envelope ---------------------------------+--> ProcesarEventoUseCase --> ILogRepository (PostgreSQL / MongoDB / memoria)
                                                           |            |
  POST /api/logs ------------------------------------------+            +--> SsePantallaNotifier --+--> /api/pantallas/stream    (Pantallas Públicas)
                                                                                                   +--> /api/logs/stream-interno (Bitácora / PopUps)
 
- GET /api/logs, /api/logs/{id}, /api/logs/resumen, /api/pantallas/* ---> ConsultarLogsUseCase --> MongoLogRepository
+ GET /api/logs, /api/logs/{id}, /api/logs/resumen, /api/pantallas/* ---> ConsultarLogsUseCase --> ILogRepository
 ```
 
 ### Tecnologías
@@ -132,7 +136,8 @@ Logs (API)  ---->  Aplication  ---->  Domain
 | Componente | Tecnología | Versión |
 |---|---|---|
 | Plataforma | .NET, ASP.NET Core Minimal API | 8.0 |
-| Persistencia | MongoDB (`MongoDB.Driver`), colecciones `LogsCentralizados` y `TableroVuelos` | Driver 3.12.0 |
+| Persistencia (por defecto) | PostgreSQL (`Npgsql`), tablas `logs.logs_centralizados` y `logs.tablero_vuelos` | Npgsql 8.0.5 |
+| Persistencia (alternativa local) | MongoDB (`MongoDB.Driver`), colecciones `LogsCentralizados` y `TableroVuelos` | Driver 3.12.0 |
 | Mensajería | RabbitMQ (`RabbitMQ.Client`), exchange tipo *topic* | Cliente 7.2.2 |
 | Tiempo real | Server-Sent Events (SSE) con `System.Threading.Channels` | Incluido en .NET 8 |
 | Autenticación | JWT Bearer (`Microsoft.AspNetCore.Authentication.JwtBearer`), tokens emitidos por el Grupo 7 | 8.0.10 |
@@ -141,7 +146,9 @@ Logs (API)  ---->  Aplication  ---->  Domain
 | Contenedores | Docker (imágenes `mcr.microsoft.com/dotnet/sdk:8.0` y `aspnet:8.0`) | - |
 | Interfaz web | HTML, CSS y JavaScript sin frameworks (`EventSource`, `fetch`) | - |
 
-**Justificación de MongoDB:** el servicio recibe un volumen alto de escrituras con estructura variable (cada grupo define su propio `payload`), y MongoDB permite guardar ese contenido sin esquema fijo y eliminar los registros vencidos de forma automática mediante un índice TTL.
+**Justificación de PostgreSQL:** la infraestructura compartida del curso ofrece una base PostgreSQL con un schema por grupo, y usarla nos permite convivir con el resto de los servicios en la misma infraestructura. El contenido variable de cada evento se guarda en una columna `jsonb`, de modo que se conserva sin un esquema fijo.
+
+**Justificación de MongoDB (alternativa):** la consigna recomienda MongoDB para este componente porque el servicio recibe un volumen alto de escrituras con estructura variable (cada grupo define su propio `payload`), y MongoDB permite guardar ese contenido sin esquema fijo y eliminar los registros vencidos de forma automática mediante un índice TTL. Mantenemos esta implementación para el desarrollo local; ambas se eligen por configuración sin cambiar el resto del código, porque los casos de uso dependen de la interfaz `ILogRepository`.
 
 **Justificación de SSE:** las pantallas solo necesitan recibir datos del servidor (comunicación unidireccional). SSE funciona sobre HTTP estándar, atraviesa el API Gateway sin configuración especial y el navegador reconecta automáticamente con `EventSource`.
 
@@ -156,13 +163,22 @@ Al iniciar, `Program.cs` realiza las siguientes acciones, en este orden:
 1. Registra Swagger y una política CORS que permite cualquier origen, encabezado y método.
 2. Configura la autenticación JWT Bearer con los valores `Jwt:Key`, `Jwt:Audience` y lee el indicador `Jwt:RequireJwtInLogs`.
 3. Lee la sección `BusinessConfig` de `appsettings.json` y la registra como *singleton* (`LogsBusinessConfig`).
-4. Registra como *singleton* el repositorio (`MongoLogRepository`) y el notificador SSE (`SsePantallaNotifier`, también expuesto como `IPantallaNotifier`).
+4. Lee `Persistencia:Proveedor` y registra como *singleton* el repositorio que corresponde: `PostgresLogRepository` (valor `Postgres`, que es el valor por defecto) junto con el servicio de limpieza `PostgresLimpiezaHostedService`, o `MongoLogRepository` (valor `Mongo`). También registra el notificador SSE (`SsePantallaNotifier`, expuesto como `IPantallaNotifier`).
 5. Registra como *scoped* los casos de uso `ProcesarEventoUseCase` y `ConsultarLogsUseCase`.
 6. Registra el consumidor de RabbitMQ como servicio en segundo plano (`BackgroundService`).
 7. Activa CORS, archivos por defecto (`index.html`), archivos estáticos, Swagger, autenticación y autorización.
 8. Publica los endpoints REST y SSE (sección 10).
 
-Cuando se construye por primera vez, `MongoLogRepository`:
+Cuando se construye por primera vez, `PostgresLogRepository`:
+
+1. Lee `Postgres:ConnectionString` y `Postgres:Schema` (por defecto `logs`).
+2. Si hay cadena de conexión, se conecta y crea, si no existen, las tablas `logs_centralizados` y `tablero_vuelos` con sus índices (sección 7.5):
+   - `idx_logs_unique_event_id`: índice único sobre `event_id`, para impedir eventos repetidos.
+   - `idx_logs_idempotencia`: índice sobre `lower(origen)`, `lower(tipo_evento)`, `lower(ubicacion_id)` y `timestamp_emision`, para que la verificación de idempotencia sea rápida.
+   - `idx_logs_expiracion`, `idx_logs_timestamp`, `idx_logs_publicos` e `idx_vuelos_actualizacion`, para la limpieza y los listados.
+3. Si no hay cadena de conexión o PostgreSQL no responde, opera en modo de memoria local (sección 3.8).
+
+Cuando se usa MongoDB, `MongoLogRepository`:
 
 1. Registra el serializador de `Guid` en formato estándar (requerido por el driver 3.x) y define `VueloId` como clave (`_id`) de `VueloPantalla`.
 2. Si existe `MongoDb:ConnectionString`, se conecta (con un tiempo máximo de selección de servidor de 3 segundos) y crea tres índices en `LogsCentralizados`:
@@ -220,7 +236,7 @@ Cliente HTTP --> POST /api/logs/envelope ---------------------------+      1. Va
 Paso a paso:
 
 1. Se valida que `origen` y `tipo` no estén vacíos y que `timestamp` esté informado. Si no, se lanza `ArgumentException` (`400` por REST, `Nack` por RabbitMQ).
-2. El `timestamp` se convierte a UTC y se trunca a milisegundos, que es la precisión con la que MongoDB guarda las fechas.
+2. El `timestamp` se convierte a UTC y se trunca a milisegundos, la precisión común con la que ambas bases guardan y comparan las fechas.
 3. Si el `eventId` no viene o es vacío, el servicio genera uno nuevo. Si viene y ya existe un registro con ese valor, el evento se descarta.
 4. Se extrae la ubicación del `payload` (sección 8.5) y se busca el último `timestampEmision` registrado para la combinación `origen + tipo + ubicación`. Si el `timestamp` recibido es menor o igual, el evento se descarta.
 5. Se deduce la severidad a partir del texto del `tipo` y del estado informado en el `payload` (`estadoNuevo` o, si no viene, `estado`) (sección 8.4), y se determina si es público (sección 8.2).
@@ -271,22 +287,23 @@ Como cada cliente tiene su propia cola, la notificación nunca bloquea al consum
 
 | Situación | Comportamiento |
 |---|---|
-| No hay `MongoDb:ConnectionString` o MongoDB no responde al iniciar | Se utiliza memoria local acotada (sección 3.8). Los datos se pierden al reiniciar. |
-| Falla una inserción en MongoDB | Se registra el error y el log se guarda en memoria local. |
+| No hay cadena de conexión o la base de datos no responde al iniciar | Se utiliza memoria local acotada (sección 3.8). Los datos se pierden al reiniciar. |
+| Falla una inserción en la base de datos | Se registra el error y el log se guarda en memoria local. |
 | Inserción con un `eventId` que ya existe (dos envíos simultáneos del mismo evento) | El índice único lo rechaza; el servicio lo registra como duplicado y no lo guarda en ningún lado. |
-| Falla una consulta en MongoDB | Se registra la advertencia y se responde con los datos de memoria local. |
+| Falla una consulta en la base de datos | Se registra la advertencia y se responde con los datos de memoria local. |
+| Falla la limpieza periódica de PostgreSQL | Se registra la advertencia y se reintenta en el siguiente ciclo (10 minutos). |
 | RabbitMQ no disponible | Reintento cada 10 segundos; la API REST sigue funcionando. |
 | Un cliente SSE es lento o se desconecta | Solo se afecta su propia cola; el resto de los clientes sigue recibiendo. |
 | Conexión SSE inactiva a través de un proxy | El *heartbeat* de 15 segundos evita que el proxy la cierre por inactividad. |
 
 ### 3.8 Modo de memoria local
 
-Cuando MongoDB no está disponible, el repositorio usa dos estructuras en memoria:
+Cuando la base de datos (PostgreSQL o MongoDB) no está disponible, el repositorio usa dos estructuras en memoria:
 
 - **Logs:** una cola concurrente que conserva como máximo **1000** registros; al superar ese número se eliminan los más antiguos.
 - **Tablero de vuelos:** un diccionario concurrente por `vueloId`.
 
-Al igual que con MongoDB, en este modo las búsquedas por `origen`, `tipo` y `severidad` no distinguen mayúsculas y minúsculas.
+Al igual que con la base de datos, en este modo las búsquedas por `origen`, `tipo` y `severidad` no distinguen mayúsculas y minúsculas.
 
 ---
 
@@ -296,7 +313,9 @@ Al igual que con MongoDB, en este modo las búsquedas por `origen`, `tipo` y `se
 |---|---|---|
 | .NET SDK | 8.0 o superior | Sí, para ejecutar sin Docker |
 | Docker | Cualquier versión reciente | Sí, para ejecutar en contenedor |
-| MongoDB | 6.x o 7.x (por defecto `localhost:27017`) | Recomendado. Sin MongoDB se usa memoria local. |
+| PostgreSQL | 14 o superior. En la infraestructura compartida: `100.105.160.96:30432`, base `aeropuerto`, schema `logs` | Sí, en el modo por defecto. Sin base de datos se usa memoria local. |
+| Tailscale | Cliente instalado y unido a la red del equipo | Sí, para conectarse a la infraestructura compartida (PostgreSQL, RabbitMQ y la VM). |
+| MongoDB | 6.x o 7.x (por defecto `localhost:27017`) | Opcional, solo si se usa `Persistencia:Proveedor = Mongo`. |
 | RabbitMQ | 3.x (puertos 5672 y 15672 con el plugin de administración) | Necesario para la integración por bus. |
 | Postman o Insomnia | Para probar los endpoints | Opcional |
 | Navegador moderno | Para las Pantallas Públicas (soporte de `EventSource`) | Opcional |
@@ -307,14 +326,23 @@ Sistemas operativos soportados: Windows, Linux y macOS (cualquier sistema con .N
 
 ### Servicios auxiliares con Docker
 
+Para trabajar sin la infraestructura compartida, se pueden levantar los servicios en el propio equipo:
+
 ```bash
-docker run -d --name mongo  -p 27017:27017 mongo:7
+# PostgreSQL local con el schema "logs"
+docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=aeropuerto -p 5432:5432 postgres:16
+docker exec -it postgres psql -U postgres -d aeropuerto -c "CREATE SCHEMA logs;"
+
+# RabbitMQ local
 docker run -d --name rabbit -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+
+# MongoDB local (solo si se usa Persistencia:Proveedor = Mongo)
+docker run -d --name mongo -p 27017:27017 mongo:7
 ```
 
 La consola de administración de RabbitMQ queda disponible en `http://localhost:15672` (usuario `guest`, contraseña `guest`).
 
-En el entorno integrado, RabbitMQ y el API Gateway los despliega el Grupo 6; en ese caso solo se debe levantar MongoDB y configurar los datos del broker compartido (sección 5).
+En el entorno integrado, PostgreSQL, RabbitMQ y el API Gateway forman parte de la infraestructura compartida que despliega el Grupo 6; en ese caso no hace falta levantar nada localmente, solo configurar las direcciones y credenciales (sección 5).
 
 ---
 
@@ -324,12 +352,19 @@ Toda la configuración está en `Logs/appsettings.json`:
 
 ```json
 {
+  "Persistencia": {
+    "Proveedor": "Postgres"
+  },
+  "Postgres": {
+    "ConnectionString": "Host=100.105.160.96;Port=30432;Database=aeropuerto;Username=grupo8_app;Password=<contraseña>;Search Path=logs,public;",
+    "Schema": "logs"
+  },
   "MongoDb": {
     "ConnectionString": "mongodb://localhost:27017",
     "DatabaseName": "AeropuertoLogsDb"
   },
   "RabbitMq": {
-    "Host": "localhost",
+    "Host": "100.105.160.96",
     "Port": 5672,
     "Username": "guest",
     "Password": "guest",
@@ -359,22 +394,27 @@ Toda la configuración está en `Logs/appsettings.json`:
 
 | Clave | Valor por defecto | Descripción |
 |---|---|---|
-| `MongoDb:ConnectionString` | `mongodb://localhost:27017` | Cadena de conexión a MongoDB. Si se deja vacía, se usa memoria local. |
-| `MongoDb:DatabaseName` | `AeropuertoLogsDb` | Base de datos. Colecciones: `LogsCentralizados` y `TableroVuelos`. |
-| `RabbitMq:Host` | `localhost` | Host del broker. |
+| `Persistencia:Proveedor` | `Postgres` | Base de datos a utilizar: `Postgres` o `Mongo`. Si no está configurada, se usa `Postgres`. También se acepta la clave `DatabaseProvider`. |
+| `Postgres:ConnectionString` | Infraestructura compartida | Cadena de conexión a PostgreSQL. Si se deja vacía, se usa memoria local. También se acepta la clave `PostgresDb:ConnectionString`. |
+| `Postgres:Schema` | `logs` | Schema donde se crean las tablas. Solo admite minúsculas, números y guion bajo. También se acepta `PostgresDb:Schema`. |
+| `MongoDb:ConnectionString` | `mongodb://localhost:27017` | Cadena de conexión a MongoDB (solo con `Proveedor = Mongo`). Si se deja vacía, se usa memoria local. |
+| `MongoDb:DatabaseName` | `AeropuertoLogsDb` | Base de datos de MongoDB. Colecciones: `LogsCentralizados` y `TableroVuelos`. |
+| `RabbitMq:Host` | `100.105.160.96` | Host del broker (la VM de la infraestructura compartida). Para un broker local, `localhost`. |
 | `RabbitMq:Port` | `5672` | Puerto AMQP. |
-| `RabbitMq:Username` | `guest` | Usuario del broker. |
+| `RabbitMq:Username` | `guest` | Usuario del broker. El usuario `guest` solo puede conectarse desde el mismo equipo del broker: para el broker compartido se debe usar el usuario que indique el Grupo 6. |
 | `RabbitMq:Password` | `guest` | Contraseña del broker. |
 | `RabbitMq:VirtualHost` | `/` | Virtual host. |
 | `RabbitMq:Exchange` | `aeropuerto_events` | Exchange tipo *topic*, durable. |
 | `RabbitMq:Queue` | `grupo8_logs_queue` | Cola durable propia del Grupo 8. |
 | `BusinessConfig:DiasRetencionLogs` | `30` | Días que se conserva cada log antes de su eliminación automática. Si se configura `0` o un valor negativo, se usan 30 días. |
 | `BusinessConfig:EventosPublicos` | Lista anterior | Tipos de evento que se muestran en las Pantallas Públicas (sección 8.2). |
-| `Jwt:Key` | Valor de desarrollo | Clave simétrica (HS256) con la que el Grupo 7 firma los tokens. Debe reemplazarse por la clave real acordada. |
+| `Jwt:Key` | Valor de desarrollo | Clave simétrica (HS256) con la que el Grupo 7 firma los tokens. Debe coincidir con la clave real del Grupo 7. |
 | `Jwt:Audience` | `logs-api` | `audience` que deben tener los tokens. |
-| `Jwt:RequireJwtInLogs` | `false` | Si es `true`, `GET /api/logs` y `GET /api/logs/resumen` exigen un token válido (sección 14). |
+| `Jwt:RequireJwtInLogs` | `false` | Si es `true`, `GET /api/logs`, `GET /api/logs/{id}` y `GET /api/logs/resumen` exigen un token válido (sección 14). |
 
-Todas las claves pueden sobrescribirse con variables de entorno, usando doble guion bajo como separador de niveles: `MongoDb__ConnectionString`, `RabbitMq__Host`, `RabbitMq__Password`, `Jwt__Key`, `Jwt__RequireJwtInLogs`. Para una lista, cada elemento lleva su índice: `BusinessConfig__EventosPublicos__0`, `BusinessConfig__EventosPublicos__1`, etc.
+Todas las claves pueden sobrescribirse con variables de entorno, usando doble guion bajo como separador de niveles: `Persistencia__Proveedor`, `Postgres__ConnectionString`, `MongoDb__ConnectionString`, `RabbitMq__Host`, `RabbitMq__Password`, `Jwt__Key`, `Jwt__RequireJwtInLogs`. Para una lista, cada elemento lleva su índice: `BusinessConfig__EventosPublicos__0`, `BusinessConfig__EventosPublicos__1`, etc.
+
+**Credenciales:** las contraseñas de PostgreSQL y RabbitMQ no deberían quedar escritas en `appsettings.json` dentro del repositorio. Se recomienda dejar el valor vacío o de ejemplo en el archivo y pasar el valor real por variable de entorno, por ejemplo `Postgres__ConnectionString`.
 
 ---
 
@@ -386,8 +426,40 @@ Todas las claves pueden sobrescribirse con variables de entorno, usando doble gu
 git clone https://github.com/TobiasJasson/Logs.git
 cd Logs/Logs
 dotnet restore
+```
+
+Luego se elige contra qué base de datos ejecutar. En PowerShell, las variables de entorno se definen en la misma terminal en la que se ejecuta el servicio y se pierden al cerrarla.
+
+#### Opción A: PostgreSQL de la infraestructura compartida
+
+Requiere Tailscale conectado a la red del equipo. Antes de iniciar se puede verificar el acceso con `Test-NetConnection 100.105.160.96 -Port 30432`, que debe responder `TcpTestSucceeded : True`.
+
+```powershell
+$env:Persistencia__Proveedor = "Postgres"
+$env:Postgres__ConnectionString = "Host=100.105.160.96;Port=30432;Database=aeropuerto;Username=grupo8_app;Password=<contraseña>;Timeout=5"
 dotnet run --launch-profile http
 ```
+
+#### Opción B: PostgreSQL local
+
+Con el contenedor `postgres` de la sección 4 en ejecución y el schema `logs` creado:
+
+```powershell
+$env:Persistencia__Proveedor = "Postgres"
+$env:Postgres__ConnectionString = "Host=localhost;Port=5432;Database=aeropuerto;Username=postgres;Password=postgres;Timeout=5"
+$env:RabbitMq__Host = "localhost"
+dotnet run --launch-profile http
+```
+
+#### Opción C: MongoDB local
+
+```powershell
+$env:Persistencia__Proveedor = "Mongo"
+$env:RabbitMq__Host = "localhost"
+dotnet run --launch-profile http
+```
+
+Si la conexión con PostgreSQL es correcta, la consola muestra `PostgreSQL conectado exitosamente (schema logs). Tablas e índices verificados.` Con MongoDB, el mensaje es `MongoDB conectado exitosamente`. Si aparece *"... no disponible. Operando con memoria local acotada"*, el servicio funciona pero los datos no se guardan en la base (sección 15).
 
 | Recurso | URL |
 |---|---|
@@ -408,21 +480,26 @@ docker build -f Logs/Dockerfile -t grupo8-logs .
 
 Dentro del contenedor el servicio escucha en el puerto **8080**. Ejemplo de ejecución publicando ese puerto como 5097 en el equipo:
 
+Contra la infraestructura compartida (el equipo que ejecuta Docker debe estar conectado a Tailscale):
+
 ```bash
 docker run -d --name grupo8-logs -p 5097:8080 \
-  -e MongoDb__ConnectionString=mongodb://host.docker.internal:27017 \
-  -e RabbitMq__Host=host.docker.internal \
+  -e Persistencia__Proveedor=Postgres \
+  -e "Postgres__ConnectionString=Host=100.105.160.96;Port=30432;Database=aeropuerto;Username=grupo8_app;Password=<contraseña>;Timeout=5" \
+  -e RabbitMq__Host=100.105.160.96 \
   grupo8-logs
 ```
 
-Dentro de un contenedor, `localhost` es el propio contenedor y no el equipo. Por eso MongoDB y RabbitMQ se indican como `host.docker.internal` (Docker Desktop) o, si todos los contenedores están en la misma red de Docker, por el nombre de su contenedor:
+Dentro de un contenedor, `localhost` es el propio contenedor y no el equipo. Por eso, para usar servicios que corren en el propio equipo, se indican como `host.docker.internal` (Docker Desktop) o, si todos los contenedores están en la misma red de Docker, por el nombre de su contenedor:
 
 ```bash
 docker network create aeropuerto
-docker run -d --name mongo  --network aeropuerto mongo:7
+docker run -d --name postgres --network aeropuerto -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=aeropuerto postgres:16
+docker exec -it postgres psql -U postgres -d aeropuerto -c "CREATE SCHEMA logs;"
 docker run -d --name rabbit --network aeropuerto -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 docker run -d --name grupo8-logs --network aeropuerto -p 5097:8080 \
-  -e MongoDb__ConnectionString=mongodb://mongo:27017 \
+  -e Persistencia__Proveedor=Postgres \
+  -e "Postgres__ConnectionString=Host=postgres;Port=5432;Database=aeropuerto;Username=postgres;Password=postgres;Timeout=5" \
   -e RabbitMq__Host=rabbit \
   grupo8-logs
 ```
@@ -443,13 +520,13 @@ La URL base que utilicen los demás grupos será `http://<IP-o-nombre-del-equipo
 
 ## 7. Modelo de datos
 
-### 7.1 `LogEntry` (colección `LogsCentralizados`)
+### 7.1 `LogEntry` (tabla `logs.logs_centralizados`)
 
 Cada evento se persiste con la estructura `LogEntry`. En las respuestas JSON los nombres de campo están en camelCase.
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `id` | GUID | Identificador interno del registro (clave `_id` en MongoDB). |
+| `id` | GUID | Identificador interno del registro (clave primaria en PostgreSQL; `_id` en MongoDB). |
 | `eventId` | GUID | Identificador del evento original. Lo provee el emisor en el envelope; si no lo envía, o en un log directo, lo genera el servicio. Es único. |
 | `origen` | string | Grupo o componente que emitió el evento (por ejemplo `TorreControl`). |
 | `tipoEvento` | string | Tipo de evento (por ejemplo `AutorizacionOtorgada`). |
@@ -462,13 +539,13 @@ Cada evento se persiste con la estructura `LogEntry`. En las respuestas JSON los
 | `esPublico` | boolean | Indica si el evento se muestra en las Pantallas Públicas. |
 | `payloadJson` | string | Contenido original del evento serializado como texto JSON. |
 
-### 7.2 `VueloPantalla` (colección `TableroVuelos`)
+### 7.2 `VueloPantalla` (tabla `logs.tablero_vuelos`)
 
 Cada vuelo ocupa una única fila del tablero. Cuando llega un evento del mismo vuelo, la fila se actualiza con los datos recibidos y conserva los que el evento no trae (sección 8.6).
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `vueloId` | string | Identificador del vuelo (clave `_id` en MongoDB), siempre en mayúsculas, por ejemplo `AR1234`. Un evento con `ar1234` actualiza la misma fila. |
+| `vueloId` | string | Identificador del vuelo (clave primaria en PostgreSQL; `_id` en MongoDB), siempre en mayúsculas, por ejemplo `AR1234`. Un evento con `ar1234` actualiza la misma fila. |
 | `tipoOperacion` | string | `Salida` o `Llegada`. |
 | `aerolineaOOrigen` | string | Aerolínea, aeropuerto de origen o grupo emisor, según la vía de ingreso. |
 | `destino` | string | Destino del vuelo. |
@@ -491,7 +568,7 @@ Cada vuelo ocupa una única fila del tablero. Cuando llega un evento del mismo v
 | `vuelosEnCurso` | número | Vuelos del tablero (entre los 50 actualizados más recientemente) cuyo estado no es `Arribado` ni `Cancelado`. |
 | `logsPorComponente` | objeto | Cantidad de logs por `origen`, por ejemplo `{ "TorreControl": 12 }`. Los orígenes que solo difieren en mayúsculas o espacios (`TorreControl`, `torrecontrol `) se suman en una misma entrada. |
 
-Con MongoDB, los conteos se calculan sobre toda la colección; en modo de memoria local, sobre los registros en memoria (hasta 1000).
+Con la base de datos, los conteos se calculan sobre todos los registros guardados; en modo de memoria local, sobre los registros en memoria (hasta 1000).
 
 ### 7.4 Severidades
 
@@ -504,13 +581,47 @@ Las severidades están definidas en la enumeración `NivelSeveridad` (`Domain/En
 | `Alerta` | Amarillo | Situación que requiere atención | Demora, pista ocupada, viento fuerte |
 | `Error` | Rojo | Rechazo o falla | `AutorizacionDenegada`, `PistaBloqueada`, vuelo cancelado, timeout entre servicios |
 
+### 7.5 Tablas en PostgreSQL
+
+El servicio crea las tablas al iniciar si no existen. El mismo script está en `Infrastructure/Scripts/logs_postgres.sql` para revisarlo o ejecutarlo a mano desde DBeaver. Los nombres de columna son los de las secciones 7.1 y 7.2 en formato `snake_case`.
+
+**`logs.logs_centralizados`**
+
+| Columna | Tipo | Observaciones |
+|---|---|---|
+| `id` | `uuid` | Clave primaria. |
+| `event_id` | `uuid` | Índice único (`idx_logs_unique_event_id`). |
+| `origen`, `tipo_evento`, `severidad`, `mensaje`, `ubicacion_id` | `text` | Obligatorios. |
+| `timestamp_emision`, `fecha_registro_utc`, `expira_en_utc` | `timestamptz` | Fechas en UTC. |
+| `es_publico` | `boolean` | Obligatorio. |
+| `payload` | `jsonb` | Contenido original del evento. Se devuelve en la API como el texto `payloadJson`. |
+
+**`logs.tablero_vuelos`**
+
+| Columna | Tipo | Observaciones |
+|---|---|---|
+| `vuelo_id` | `text` | Clave primaria, en mayúsculas. |
+| `tipo_operacion`, `aerolinea_o_origen`, `destino`, `horario`, `puerta`, `pista`, `estado`, `severidad_visual` | `text` | Obligatorios. |
+| `ultima_actualizacion_utc` | `timestamptz` | Índice descendente para el listado del tablero. |
+
+Consultas útiles para verificar los datos:
+
+```sql
+SELECT origen, tipo_evento, severidad, mensaje, timestamp_emision
+FROM logs.logs_centralizados ORDER BY timestamp_emision DESC LIMIT 20;
+
+SELECT * FROM logs.tablero_vuelos ORDER BY ultima_actualizacion_utc DESC;
+```
+
+En MongoDB, los mismos datos se guardan en las colecciones `LogsCentralizados` y `TableroVuelos`, con los nombres de campo en PascalCase.
+
 ---
 
 ## 8. Reglas de negocio
 
 ### 8.1 Retención
 
-Cada log se guarda con `expiraEnUtc = fecha de registro + DiasRetencionLogs` (30 días por defecto). MongoDB elimina los registros vencidos mediante el índice TTL; el proceso interno de MongoDB se ejecuta aproximadamente cada 60 segundos, por lo que la eliminación no es instantánea. Las filas del tablero de vuelos no tienen vencimiento.
+Cada log se guarda con `expiraEnUtc = fecha de registro + DiasRetencionLogs` (30 días por defecto). Con PostgreSQL, el servicio `PostgresLimpiezaHostedService` ejecuta cada 10 minutos `DELETE FROM logs.logs_centralizados WHERE expira_en_utc < now()`. Con MongoDB, los registros vencidos los elimina el índice TTL, cuyo proceso interno se ejecuta aproximadamente cada 60 segundos. En ambos casos la eliminación no es instantánea. Las filas del tablero de vuelos no tienen vencimiento.
 
 ### 8.2 Eventos públicos
 
@@ -680,6 +791,8 @@ Content-Type: application/json
 
 Basta con informar uno de los cuatro campos anteriores para que se actualice la fila del vuelo; los demás conservan su valor anterior (sección 8.6).
 | `tipoOperacion` | string | No | - | `Salida` o `Llegada`. |
+
+Basta con informar uno de los campos `estadoVuelo`, `destino`, `horario` o `puerta` para que se actualice la fila del vuelo; los demás conservan su valor anterior (sección 8.6).
 
 **Ejemplo: error técnico (solo bitácora interna)**
 
@@ -1001,7 +1114,7 @@ Antes de dar por finalizada la integración, cada grupo debe comprobar:
 
 ### 10.1 `GET /health` - Estado del servicio
 
-Permite al API Gateway, a Docker o a otro grupo verificar que el servicio está en ejecución. No verifica la conexión con MongoDB ni con RabbitMQ.
+Permite al API Gateway, a Docker o a otro grupo verificar que el servicio está en ejecución. No verifica la conexión con la base de datos ni con RabbitMQ.
 
 ```
 GET http://localhost:5097/health
@@ -1027,7 +1140,7 @@ Devuelve los registros ordenados por `timestampEmision` descendente, paginados. 
 | `page` | entero | `1` | Número de página, desde 1. Por defecto `1`. |
 | `pageSize` | entero | `50` | Registros por página, entre 1 y 200. Por defecto `50`. |
 
-Los filtros `origen`, `tipo` y `severidad` buscan el valor **exacto, sin distinguir mayúsculas y minúsculas** (`torrecontrol` encuentra `TorreControl`), tanto con MongoDB como en memoria local. Si `fechaDesde` es posterior a `fechaHasta`, el servicio intercambia ambos valores. Un `pageSize` menor que 1 se toma como 50 y uno mayor que 200 se toma como 200.
+Los filtros `origen`, `tipo` y `severidad` buscan el valor **exacto, sin distinguir mayúsculas y minúsculas** (`torrecontrol` encuentra `TorreControl`), tanto con PostgreSQL y MongoDB como en memoria local. Si `fechaDesde` es posterior a `fechaHasta`, el servicio intercambia ambos valores. Un `pageSize` menor que 1 se toma como 50 y uno mayor que 200 se toma como 200.
 
 **Solicitud (Postman / Insomnia)**
 
@@ -1103,7 +1216,7 @@ GET http://localhost:5097/api/logs/resumen
 }
 ```
 
-Con MongoDB, todas las métricas de logs se calculan sobre la colección completa (los registros dentro del período de retención). `vuelosEnCurso` se calcula sobre los 50 vuelos actualizados más recientemente.
+Con la base de datos, todas las métricas de logs se calculan sobre todos los registros guardados (los registros dentro del período de retención). `vuelosEnCurso` se calcula sobre los 50 vuelos actualizados más recientemente.
 
 ### 10.5 `POST /api/logs` - Registrar un log directo
 
@@ -1474,8 +1587,12 @@ Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen toke
 | Síntoma | Causa probable | Solución |
 |---|---|---|
 | Mensaje *"RabbitMQ no disponible... Reintentando en 10s"* | El broker no está en ejecución, o el host, puerto o credenciales son incorrectos. | Iniciar RabbitMQ o corregir la sección `RabbitMq`. El servicio se conecta automáticamente en el siguiente intento. La API REST no se ve afectada. |
-| Mensaje *"MongoDB no disponible... Operando con memoria local acotada"* | MongoDB no está en ejecución o la cadena de conexión es incorrecta. | Iniciar MongoDB y reiniciar el servicio: la conexión se evalúa solo al iniciar. |
-| Los logs desaparecen al reiniciar | El servicio está en modo de memoria local. | Configurar MongoDB (sección 5). |
+| Mensaje *"PostgreSQL no disponible. Operando con memoria local acotada"* | No hay conexión con la VM (Tailscale desconectado o sin la invitación a la red del equipo), la cadena de conexión es incorrecta o la contraseña cambió. | Verificar Tailscale y ejecutar `Test-NetConnection 100.105.160.96 -Port 30432`; revisar `Postgres:ConnectionString`; reiniciar el servicio, porque la conexión se evalúa solo al iniciar. |
+| Mensaje *"No hay ConnectionString de PostgreSQL configurada"* | `Postgres:ConnectionString` está vacía. | Configurarla en `appsettings.json` o con la variable `Postgres__ConnectionString` (sección 5). |
+| Error `permission denied for schema logs` | El usuario de PostgreSQL no tiene permisos para crear tablas en el schema. | Pedir al administrador de la infraestructura que otorgue los permisos al usuario `grupo8_app`, o crear las tablas con `Infrastructure/Scripts/logs_postgres.sql`. |
+| Error `schema "logs" does not exist` (PostgreSQL local) | No se creó el schema en la base local. | Ejecutar `CREATE SCHEMA logs;` (sección 4). |
+| Mensaje *"MongoDB no disponible... Operando con memoria local acotada"* | Se configuró `Proveedor = Mongo` y MongoDB no está en ejecución o la cadena de conexión es incorrecta. | Iniciar MongoDB y reiniciar el servicio. |
+| Los logs desaparecen al reiniciar | El servicio está en modo de memoria local. | Revisar la conexión a la base de datos (sección 5). |
 | `GET /api/logs` devuelve `[]` con filtros | El valor del filtro no coincide completo (por ejemplo `Torre` en lugar de `TorreControl`), o la página pedida no tiene datos. | Utilizar el valor completo (las mayúsculas no importan) y revisar `page`. |
 | `415 Unsupported Media Type` | Falta el encabezado `Content-Type`. | Enviar `Content-Type: application/json`. |
 | `400 Bad Request` en `POST /api/logs` | Falta `origen` o `mensaje`, o el JSON es inválido. | Revisar el cuerpo. |
@@ -1486,7 +1603,7 @@ Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen toke
 | Un vuelo aparece con destino `Sin especificar`, horario `--:--` o puerta `-` | Ningún evento de ese vuelo informó esos datos todavía. | Enviar `destino`, `horario` y `puerta` al menos en el primer evento del vuelo (por ejemplo, en `VueloCreado`); los siguientes eventos los conservan (sección 8.6). |
 | Un evento con `vueloId` no cambia el tablero | El evento no es de `GestionVuelos` y su tipo no menciona `Vuelo`. | Es el comportamiento esperado (sección 8.6). Los cambios de estado de vuelo los informa Gestión de Vuelos. |
 | Otros equipos no pueden conectarse | El servicio escucha solo en `localhost` o el firewall bloquea el puerto. | Iniciar con `--urls "http://0.0.0.0:5097"` y habilitar el puerto. |
-| El contenedor no se conecta a MongoDB o RabbitMQ | Dentro del contenedor, `localhost` es el propio contenedor. | Usar `host.docker.internal` o el nombre del contenedor en la misma red (sección 6.2). |
+| El contenedor no se conecta a la base de datos o a RabbitMQ | Dentro del contenedor, `localhost` es el propio contenedor. | Usar `host.docker.internal` o el nombre del contenedor en la misma red (sección 6.2). |
 | `docker build` falla al copiar los `.csproj` | Se ejecutó desde la carpeta `Logs/Logs`. | Ejecutar desde la raíz del repositorio con `-f Logs/Dockerfile`. |
 | El stream SSE no muestra datos | No se generaron eventos después de conectarse, o un proxy retiene la respuesta. | Generar un evento de prueba; usar `curl -N`; verificar que el proxy respete `X-Accel-Buffering: no`. |
 | RabbitMQ rechaza la conexión desde otro equipo | El usuario `guest` solo puede conectarse desde `localhost`. | Usar un usuario propio del broker compartido en `RabbitMq:Username` y `RabbitMq:Password`. |
@@ -1497,7 +1614,7 @@ Los endpoints de ingesta (`POST`), de pantallas y los canales SSE no exigen toke
 
 1. **Página pública y monitoreo en la misma vista.** `index.html` muestra en una sola página el tablero público, la bitácora interna, los PopUps y el simulador para facilitar la demostración e integración del trabajo práctico. En un despliegue productivo, las pantallas de terminal utilizarían únicamente el canal público (`/api/pantallas/stream`).
 2. **Autenticación en canales SSE.** Cuando `Jwt:RequireJwtInLogs = true`, se protegen `GET /api/logs`, `GET /api/logs/{id}` y `GET /api/logs/resumen`. El canal SSE interno (`/api/logs/stream-interno`) permanece abierto porque la API estándar `EventSource` de los navegadores no soporta el envío del encabezado `Authorization: Bearer`.
-3. **Conexión a MongoDB evaluada al iniciar.** Si MongoDB no está disponible cuando arranca el microservicio, el repositorio opera en modo de memoria local acotada (hasta 1000 registros) durante esa ejecución.
+3. **Conexión a la base de datos evaluada al iniciar.** Si PostgreSQL (o MongoDB, según la configuración) no está disponible cuando arranca el microservicio, el repositorio opera en modo de memoria local acotada (hasta 1000 registros) durante esa ejecución.
 4. **Sin total global de páginas en el listado.** `GET /api/logs` devuelve el arreglo paginado según `page` y `pageSize`, sin incluir un metadato adicional con el conteo total de páginas.
 5. **Sin cola de mensajes fallidos (DLQ).** Los mensajes de RabbitMQ con JSON inválido o sin campos obligatorios se descartan mediante `Nack` (`requeue: false`) y se registran en el log de consola del servicio.
 6. **Escalado horizontal de SSE.** Si se ejecutan múltiples instancias detrás de un balanceador, cada instancia mantiene en memoria las conexiones SSE de sus propios clientes.
@@ -1512,8 +1629,8 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 
 | Componente | Archivo | Función | Dónde se usa |
 |---|---|---|---|
-| `LogEntry` | `Entities/LogEntry.cs` | Representa un registro de log persistido (sección 7.1). | Lo crea `ProcesarEventoUseCase`; lo guarda y consulta `MongoLogRepository`; lo difunde `SsePantallaNotifier`; lo devuelven los endpoints de consulta. |
-| `VueloPantalla` | `Entities/VueloPantalla.cs` | Representa una fila del tablero de vuelos (sección 7.2). | Lo crea `ProcesarEventoUseCase`; lo guarda `MongoLogRepository` en `TableroVuelos`; lo envía `SsePantallaNotifier` en el campo `vuelo`; lo devuelve `GET /api/pantallas/vuelos`. |
+| `LogEntry` | `Entities/LogEntry.cs` | Representa un registro de log persistido (sección 7.1). | Lo crea `ProcesarEventoUseCase`; lo guarda y consulta el repositorio configurado (`PostgresLogRepository` o `MongoLogRepository`); lo difunde `SsePantallaNotifier`; lo devuelven los endpoints de consulta. |
+| `VueloPantalla` | `Entities/VueloPantalla.cs` | Representa una fila del tablero de vuelos (sección 7.2). | Lo crea `ProcesarEventoUseCase`; lo guarda el repositorio configurado en el tablero de vuelos; lo envía `SsePantallaNotifier` en el campo `vuelo`; lo devuelve `GET /api/pantallas/vuelos`. |
 | `NivelSeveridad` | `Enums/Serveridad.cs` | Enumeración de las cuatro severidades. | `ProcesarEventoUseCase` (métodos `DeterminarSeveridadAutomatica` y `NormalizarSeveridad`). |
 
 ### 17.2 Aplicación (`Aplication`)
@@ -1522,7 +1639,7 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 
 | Componente | Archivo | Función | Implementado por / Dónde se usa |
 |---|---|---|---|
-| `ILogRepository` | `Abstractions/ILogRepository.cs` | Contrato de persistencia de logs y vuelos. | Implementado por `MongoLogRepository`. Usado por ambos casos de uso. |
+| `ILogRepository` | `Abstractions/ILogRepository.cs` | Contrato de persistencia de logs y vuelos. | Implementado por `PostgresLogRepository` y `MongoLogRepository`. Usado por ambos casos de uso. |
 | `IPantallaNotifier` | `Abstractions/IPantallaNotifier.cs` | Contrato de notificación en tiempo real. | Implementado por `SsePantallaNotifier`. Usado por `ProcesarEventoUseCase`. |
 | `LogsBusinessConfig` | `Config/LogsBusinessConfig.cs` | Retención (`DiasRetencionLogs`), lista de eventos públicos y método `EsEventoPublico`. | Se carga en `Program.cs` desde `BusinessConfig`. Usado por `ProcesarEventoUseCase`. |
 
@@ -1561,11 +1678,11 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 
 ### 17.3 Infraestructura (`Infrastructure`)
 
-**`MongoLogRepository`** (`Repositories/MongoLogRepository.cs`): implementa `ILogRepository` con MongoDB y respaldo en memoria. Se registra como *singleton*.
+**`PostgresLogRepository`** (`Repositories/PostgresLogRepository.cs`) y **`MongoLogRepository`** (`Repositories/MongoLogRepository.cs`): implementan `ILogRepository` con PostgreSQL y con MongoDB respectivamente, ambos con respaldo en memoria. Solo uno de los dos se registra como *singleton*, según `Persistencia:Proveedor`. Los dos tienen los mismos métodos públicos y el mismo comportamiento:
 
 | Método | Función | Se llama desde |
 |---|---|---|
-| Constructor | Configura serializadores, se conecta y crea índices (sección 3.1). | Contenedor de dependencias, la primera vez que se necesita. |
+| Constructor | Se conecta y crea las tablas e índices (PostgreSQL) o los índices y serializadores (MongoDB) (sección 3.1). | Contenedor de dependencias, la primera vez que se necesita. |
 | `SaveAsync` | Inserta un log; si el `eventId` ya existe lo ignora; si falla por otro motivo, lo guarda en memoria. | `EjecutarDesdeBusAsync`, `EjecutarDirectoAsync`. |
 | `GetByIdAsync` | Busca un log por `id`. | `ObtenerPorIdAsync`. |
 | `ExistsEventIdAsync` | Indica si ya existe un log con ese `eventId`. | `EjecutarDesdeBusAsync`. |
@@ -1575,7 +1692,12 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 | `GetVueloPantallaByIdAsync` | Devuelve la fila actual de un vuelo, buscando el identificador sin distinguir mayúsculas, para combinarla con los datos nuevos. | `EjecutarDirectoAsync`, `ActualizarTableroVuelosSiCorrespondeAsync`. |
 | `UpsertVueloPantallaAsync` | Normaliza el `vueloId` a mayúsculas e inserta o reemplaza la fila del vuelo (ya combinada). | `EjecutarDirectoAsync`, `ActualizarTableroVuelosSiCorrespondeAsync`. |
 | `GetVuelosPantallaAsync` | Hasta 50 filas del tablero. | `ObtenerTableroVuelosAsync`, `GetResumenDashboardAsync`. |
-| `GetResumenDashboardAsync` | Calcula las métricas del dashboard con conteos y una agregación por `origen` en MongoDB (o sobre la memoria local). | `ObtenerResumenDashboardAsync`. |
+| `GetResumenDashboardAsync` | Calcula las métricas del dashboard con conteos y una agrupación por `origen` en la base de datos (o sobre la memoria local). | `ObtenerResumenDashboardAsync`. |
+| `EliminarLogsVencidosAsync` (solo PostgreSQL) | Borra los logs cuyo `expira_en_utc` ya pasó y devuelve la cantidad eliminada. | `PostgresLimpiezaHostedService`. |
+
+**`PostgresLimpiezaHostedService`** (`Repositories/PostgresLimpiezaHostedService.cs`): servicio en segundo plano que reemplaza al índice TTL de MongoDB. Se registra solo cuando `Persistencia:Proveedor = Postgres`. Cada 10 minutos llama a `PostgresLogRepository.EliminarLogsVencidosAsync`; si falla, registra una advertencia y lo vuelve a intentar en el ciclo siguiente.
+
+**`logs_postgres.sql`** (`Scripts/logs_postgres.sql`): script con las tablas e índices de PostgreSQL (sección 7.5). No es necesario ejecutarlo, porque el servicio los crea al iniciar.
 
 **`SsePantallaNotifier`** (`Notifications/SsePantallaNotifier.cs`): implementa `IPantallaNotifier`. Se registra como *singleton* (una única lista de suscriptores para toda la aplicación).
 
@@ -1597,7 +1719,7 @@ Esta sección describe la función de cada parte del código, desde dónde se ll
 
 | Componente | Función |
 |---|---|
-| `Program.cs` | Registra las dependencias (sección 3.1), configura el middleware y define los endpoints de la sección 10. |
+| `Program.cs` | Registra las dependencias (sección 3.1), elige el repositorio según `Persistencia:Proveedor`, configura el middleware y define los endpoints de la sección 10. |
 | `ManejarStreamSseAsync` (función local de `Program.cs`) | Atiende una conexión SSE: configura encabezados, suscribe al cliente, escribe los mensajes y envía el *heartbeat*. La usan `GET /api/pantallas/stream` (`soloPublicos: true`) y `GET /api/logs/stream-interno` (`soloPublicos: false`). |
 | `Dockerfile` | Compila y publica el proyecto en una imagen basada en `aspnet:8.0` que escucha en el puerto 8080 (sección 6.2). |
 | `Logs.http` | Peticiones de prueba para Visual Studio o VS Code (sección 12.3). |
